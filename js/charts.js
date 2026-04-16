@@ -1,4 +1,4 @@
-/* Chart rendering + lifecycle management. */
+/* Chart rendering + lifecycle. Prefer update-in-place over destroy/recreate. */
 
 const MODEL_COLORS = Object.freeze({
   Naive: "#8a8a86",
@@ -62,32 +62,61 @@ const FEATURE_LABELS = Object.freeze({
 });
 
 const chartInstances = new Map();
-const chartCleanups = new Map(); // key -> cleanup fn
-
-const chartKey = (id) => id;
+const chartCleanups = new Map();
 
 const destroyChart = (key) => {
-  const k = chartKey(key);
-  const existing = chartInstances.get(k);
+  const existing = chartInstances.get(key);
   if (existing) {
-    existing.destroy();
-    chartInstances.delete(k);
+    try { existing.destroy(); } catch { /* noop */ }
+    chartInstances.delete(key);
   }
-  const cleanup = chartCleanups.get(k);
+  const cleanup = chartCleanups.get(key);
   if (cleanup) {
-    cleanup();
-    chartCleanups.delete(k);
+    try { cleanup(); } catch { /* noop */ }
+    chartCleanups.delete(key);
   }
 };
 
 const destroyAllCharts = () => {
-  for (const c of chartInstances.values()) c.destroy();
-  chartInstances.clear();
-  for (const fn of chartCleanups.values()) fn();
-  chartCleanups.clear();
+  for (const key of Array.from(chartInstances.keys())) destroyChart(key);
+  for (const key of Array.from(chartCleanups.keys())) {
+    const fn = chartCleanups.get(key);
+    try { fn?.(); } catch { /* noop */ }
+    chartCleanups.delete(key);
+  }
 };
 
-const getCssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const destroyChartsMatching = (predicate) => {
+  const seen = new Set();
+  for (const key of Array.from(chartInstances.keys())) {
+    if (predicate(key)) { destroyChart(key); seen.add(key); }
+  }
+  // Some render targets (e.g. SVG regime timeline) register a cleanup without a Chart instance.
+  for (const key of Array.from(chartCleanups.keys())) {
+    if (!seen.has(key) && predicate(key)) {
+      const fn = chartCleanups.get(key);
+      try { fn?.(); } catch { /* noop */ }
+      chartCleanups.delete(key);
+    }
+  }
+};
+
+const _cssVarCache = new Map();
+let _cssVarTheme = null;
+
+const invalidateCssVarCache = () => _cssVarCache.clear();
+
+const getCssVar = (name) => {
+  const theme = document.documentElement.dataset.theme || "auto";
+  if (theme !== _cssVarTheme) {
+    _cssVarCache.clear();
+    _cssVarTheme = theme;
+  }
+  if (_cssVarCache.has(name)) return _cssVarCache.get(name);
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  _cssVarCache.set(name, v);
+  return v;
+};
 
 const modelColor = (modelName) => {
   if (modelName === "VotingEnsemble") return getCssVar("--chart-color-voting") || MODEL_COLORS.VotingEnsemble;
@@ -107,63 +136,63 @@ const baseChartOptions = (nPoints) => {
   return {
     responsive: true,
     maintainAspectRatio: false,
-    animation: { duration: nPoints > 500 ? 0 : 280 },
+    animation: { duration: nPoints > 500 ? 0 : 220 },
     interaction: { mode: "index", intersect: false },
     plugins: {
-      legend: {
-        labels: { color: text, boxWidth: 10, boxHeight: 10, usePointStyle: true },
-      },
-      tooltip: {
-        callbacks: {},
-      },
-      decimation: {
-        enabled: true,
-        algorithm: "lttb",
-        samples: 500,
-      },
+      legend: { labels: { color: text, boxWidth: 10, boxHeight: 10, usePointStyle: true } },
+      tooltip: { callbacks: {} },
+      decimation: { enabled: true, algorithm: "lttb", samples: 500 },
       zoom: {
         pan: { enabled: true, mode: "x" },
         zoom: {
-          wheel: { enabled: true },
+          wheel: { enabled: true, modifierKey: "shift" },
           pinch: { enabled: true },
+          drag: { enabled: false },
           mode: "x",
         },
         limits: { x: { min: "original", max: "original" } },
       },
     },
     scales: {
-      x: {
-        ticks: { color: muted, maxRotation: 0, autoSkip: true },
-        grid: { color: border },
-      },
-      y: {
-        ticks: { color: muted },
-        grid: { color: border },
-      },
+      x: { ticks: { color: muted, maxRotation: 0, autoSkip: true }, grid: { color: border } },
+      y: { ticks: { color: muted }, grid: { color: border } },
     },
   };
 };
 
 const attachZoomReset = ({ chart, button, key }) => {
   if (!button) return;
+  // Detach any previous listener bound to this key to avoid leaks on chart reuse.
+  const prev = chartCleanups.get(key);
+  if (prev) {
+    try { prev(); } catch { /* noop */ }
+    chartCleanups.delete(key);
+  }
+
   const updateBtn = () => {
     const zs = chart.getZoomLevel?.() ?? 1;
-    button.hidden = !(zs && zs > 1.001);
+    const active = !!(zs && zs > 1.001);
+    if (button.hidden === active) button.hidden = !active;
   };
   const onClick = () => {
-    chart.resetZoom?.();
+    chart.resetZoom?.("none");
     button.hidden = true;
   };
   button.addEventListener("click", onClick);
-  const t = setInterval(updateBtn, 400);
-  chartCleanups.set(chartKey(key), () => {
-    clearInterval(t);
-    button.removeEventListener("click", onClick);
-  });
+  button.hidden = true;
+
+  // Use Chart.js zoom plugin events instead of polling.
+  const zoomOpts = chart.options.plugins?.zoom ?? {};
+  zoomOpts.zoom = zoomOpts.zoom || {};
+  zoomOpts.pan = zoomOpts.pan || {};
+  zoomOpts.zoom.onZoomComplete = updateBtn;
+  zoomOpts.pan.onPanComplete = updateBtn;
+
+  chartCleanups.set(key, () => button.removeEventListener("click", onClick));
 };
 
 const buildRegimeAnnotations = ({ regime, regimeNames, labels }) => {
-  if (!regime || !Array.isArray(regime) || !regimeNames || !Array.isArray(regimeNames)) return {};
+  if (!Array.isArray(regime) || !Array.isArray(regimeNames)) return {};
   if (regime.length !== labels.length) return {};
   const ann = {};
   let start = 0;
@@ -176,7 +205,7 @@ const buildRegimeAnnotations = ({ regime, regimeNames, labels }) => {
         type: "box",
         xMin: labels[start],
         xMax: labels[i - 1],
-        backgroundColor: `${c}59`, // ~0.35 alpha
+        backgroundColor: `${c}59`,
         borderWidth: 0,
       };
       start = i;
@@ -185,30 +214,40 @@ const buildRegimeAnnotations = ({ regime, regimeNames, labels }) => {
   return ann;
 };
 
-const renderPriceChart = ({ key = "price", canvas, tickerData, modelSet, regimeOverlay, resetButton } = {}) => {
-  assert(canvas, "renderPriceChart: missing canvas");
+/** Upsert: create chart if absent, otherwise update data/options in place. */
+const upsertChart = (key, canvas, spec) => {
+  const existing = chartInstances.get(key);
+  if (existing && existing.ctx?.canvas === canvas) {
+    existing.data = spec.data;
+    existing.options = spec.options;
+    existing.update("none");
+    return existing;
+  }
   destroyChart(key);
+  const chart = new Chart(canvas.getContext("2d"), { type: spec.type, data: spec.data, options: spec.options });
+  chartInstances.set(key, chart);
+  return chart;
+};
 
-  const labels = tickerData.dates;
-  const n = labels.length;
-
-  const actual = tickerData.actual.map((v) => (v != null && Number.isFinite(v) ? Number(v) : null));
-
-  const datasets = [];
-  datasets.push({
-    label: "Actual",
-    data: actual,
-    borderColor: getCssVar("--color-text"),
-    borderWidth: 3,
-    pointRadius: 0,
-    spanGaps: false,
-  });
+const buildPriceDatasets = ({ tickerData, modelSet }) => {
+  const textColor = getCssVar("--color-text");
+  const datasets = [
+    {
+      label: "Actual",
+      data: tickerData.actual,
+      borderColor: textColor,
+      borderWidth: 2.25,
+      pointRadius: 0,
+      spanGaps: false,
+      tension: 0.15,
+    },
+  ];
 
   const naive = tickerData.predictions?.Naive;
   if (Array.isArray(naive)) {
     datasets.push({
       label: "Naive",
-      data: naive.map((v) => (v != null && Number.isFinite(v) ? Number(v) : null)),
+      data: naive,
       borderColor: modelColor("Naive") ?? "#888780",
       borderWidth: 1,
       borderDash: [6, 4],
@@ -217,23 +256,32 @@ const renderPriceChart = ({ key = "price", canvas, tickerData, modelSet, regimeO
     });
   }
 
-  const selected = Array.from(modelSet || []);
-  for (const m of selected) {
+  for (const m of modelSet) {
     if (m === "Naive") continue;
     const arr = tickerData.predictions?.[m];
     if (!Array.isArray(arr)) continue;
     datasets.push({
       label: m,
-      data: arr.map((v) => (v != null && Number.isFinite(v) ? Number(v) : null)),
+      data: arr,
       borderColor: modelColor(m) ?? autoColorForKey(m, { sat: 62, light: 46 }),
-      borderWidth: m === "Naive" ? 1 : 2,
+      borderWidth: 1.75,
       borderDash: MODEL_DASHES[m] ?? [],
       pointRadius: 0,
       spanGaps: false,
+      tension: 0.1,
     });
   }
+  return datasets;
+};
 
-  const opts = baseChartOptions(n);
+const renderPriceChart = ({ key = "price", canvas, tickerData, modelSet, regimeOverlay, resetButton } = {}) => {
+  assert(canvas, "renderPriceChart: missing canvas");
+
+  const labels = tickerData.dates;
+  const selected = Array.from(modelSet || []);
+  const datasets = buildPriceDatasets({ tickerData, modelSet: selected });
+
+  const opts = baseChartOptions(labels.length);
   opts.scales.y.ticks.callback = (v) => `$${Number(v).toFixed(0)}`;
   opts.plugins.tooltip.callbacks = {
     title: (items) => items?.[0]?.label ?? "",
@@ -242,34 +290,31 @@ const renderPriceChart = ({ key = "price", canvas, tickerData, modelSet, regimeO
       if (y == null || !Number.isFinite(y)) return `${ctx.dataset.label}: —`;
       const a = ctx.chart.data.datasets?.[0]?.data?.[ctx.dataIndex];
       const delta = (a != null && Number.isFinite(a)) ? (y - a) : null;
-      const d = delta != null ? ` (Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(2)})` : "";
-      return `${ctx.dataset.label}: ${Number(y).toFixed(2)}${d}`;
+      const deltaStr = delta != null ? ` (Δ ${delta >= 0 ? "+" : ""}${delta.toFixed(2)})` : "";
+      return `${ctx.dataset.label}: ${Number(y).toFixed(2)}${deltaStr}`;
     },
   };
 
   if (regimeOverlay) {
-    const ann = buildRegimeAnnotations({
-      regime: tickerData.regime,
-      regimeNames: tickerData.regime_names,
-      labels,
-    });
-    opts.plugins.annotation = { annotations: ann };
+    opts.plugins.annotation = {
+      annotations: buildRegimeAnnotations({
+        regime: tickerData.regime,
+        regimeNames: tickerData.regime_names,
+        labels,
+      }),
+    };
+  } else {
+    opts.plugins.annotation = { annotations: {} };
   }
 
-  const chart = new Chart(canvas.getContext("2d"), {
-    type: "line",
-    data: { labels, datasets },
-    options: opts,
-  });
-  chartInstances.set(chartKey(key), chart);
+  const chart = upsertChart(key, canvas, { type: "line", data: { labels, datasets }, options: opts });
   attachZoomReset({ chart, button: resetButton, key });
   return chart;
 };
 
 const renderRmseChart = ({ canvas, rows, resetButton } = {}) => {
   assert(canvas, "renderRmseChart: missing canvas");
-  destroyChart("rmse");
-  const sorted = (rows || []).slice().sort((a, b) => (a.rmse - b.rmse));
+  const sorted = (rows || []).slice().sort((a, b) => a.rmse - b.rmse);
   const labels = sorted.map((r) => r.label);
   const data = sorted.map((r) => r.rmse);
   const colors = sorted.map((r) => r.color);
@@ -277,8 +322,8 @@ const renderRmseChart = ({ canvas, rows, resetButton } = {}) => {
   const opts = baseChartOptions(labels.length);
   opts.scales.y.title = { display: true, text: "RMSE/mean (test)", color: getCssVar("--color-text-muted") };
   opts.plugins.legend.display = false;
-  // Intentionally avoid hardcoded reference lines; keep chart data-driven.
-  const chart = new Chart(canvas.getContext("2d"), {
+
+  const chart = upsertChart("rmse", canvas, {
     type: "bar",
     data: {
       labels,
@@ -286,25 +331,21 @@ const renderRmseChart = ({ canvas, rows, resetButton } = {}) => {
     },
     options: opts,
   });
-  chartInstances.set(chartKey("rmse"), chart);
   attachZoomReset({ chart, button: resetButton, key: "rmse" });
   return chart;
 };
 
 const renderEquityChart = ({ canvas, tickerData, modelSet } = {}) => {
   assert(canvas, "renderEquityChart: missing canvas");
-  destroyChart("equity");
 
   const labels = tickerData.dates;
-  const n = labels.length;
-  const logRets = tickerData.strategy_log_returns || {};
+  const equity = tickerData.equity || {};
 
   const datasets = [];
-  const naive = logRets?.Naive;
-  if (Array.isArray(naive)) {
+  if (Array.isArray(equity.Naive)) {
     datasets.push({
       label: "Naive",
-      data: cumulativeFromLogReturns(naive),
+      data: equity.Naive,
       borderColor: modelColor("Naive") ?? "#888780",
       borderWidth: 1,
       borderDash: [6, 4],
@@ -314,19 +355,19 @@ const renderEquityChart = ({ canvas, tickerData, modelSet } = {}) => {
 
   for (const m of Array.from(modelSet || [])) {
     if (m === "Naive") continue;
-    const lr = logRets?.[m];
-    if (!Array.isArray(lr)) continue;
+    const eq = equity[m];
+    if (!Array.isArray(eq)) continue;
     datasets.push({
       label: m,
-      data: cumulativeFromLogReturns(lr),
+      data: eq,
       borderColor: modelColor(m) ?? autoColorForKey(m, { sat: 62, light: 46 }),
-      borderWidth: 2,
+      borderWidth: 1.75,
       borderDash: MODEL_DASHES[m] ?? [],
       pointRadius: 0,
     });
   }
 
-  const opts = baseChartOptions(n);
+  const opts = baseChartOptions(labels.length);
   opts.plugins.tooltip.callbacks = {
     label: (ctx) => {
       const y = ctx.parsed?.y;
@@ -337,32 +378,11 @@ const renderEquityChart = ({ canvas, tickerData, modelSet } = {}) => {
   opts.scales.y.ticks.callback = (v) => `${(Number(v) * 100).toFixed(0)}%`;
   opts.scales.y.title = { display: true, text: "Cumulative return", color: getCssVar("--color-text-muted") };
 
-  const chart = new Chart(canvas.getContext("2d"), {
-    type: "line",
-    data: { labels, datasets },
-    options: opts,
-  });
-  chartInstances.set(chartKey("equity"), chart);
-  return chart;
-};
-
-const cumulativeFromLogReturns = (logReturns) => {
-  let s = 0;
-  const out = [];
-  for (const r of logReturns) {
-    if (r == null || !Number.isFinite(r)) {
-      out.push(out.length ? out[out.length - 1] : 0);
-      continue;
-    }
-    s += Number(r);
-    out.push(Math.exp(s) - 1);
-  }
-  return out;
+  return upsertChart("equity", canvas, { type: "line", data: { labels, datasets }, options: opts });
 };
 
 const renderFeatureImportance = ({ canvas, tickerData, modelPreference } = {}) => {
   assert(canvas, "renderFeatureImportance: missing canvas");
-  destroyChart("fi");
   const fi = tickerData.feature_importance || {};
 
   const chosen = modelPreference?.find((m) => Array.isArray(fi[m]) && fi[m].length) ?? null;
@@ -374,21 +394,25 @@ const renderFeatureImportance = ({ canvas, tickerData, modelPreference } = {}) =
   const opts = baseChartOptions(labels.length);
   opts.indexAxis = "y";
   opts.plugins.legend.display = false;
-  opts.scales.x.title = { display: true, text: chosen ? `Importance (${chosen})` : "Importance", color: getCssVar("--color-text-muted") };
+  opts.plugins.zoom.zoom.wheel.enabled = false;
+  opts.plugins.zoom.pan.enabled = false;
+  opts.scales.x.title = {
+    display: true,
+    text: chosen ? `Importance (${chosen})` : "Importance",
+    color: getCssVar("--color-text-muted"),
+  };
 
   const accent = getCssVar("--color-accent");
-  const chart = new Chart(canvas.getContext("2d"), {
+  return upsertChart("fi", canvas, {
     type: "bar",
     data: { labels, datasets: [{ label: "Importance", data, backgroundColor: `${accent}bf`, borderColor: accent }] },
     options: opts,
   });
-  chartInstances.set(chartKey("fi"), chart);
-  return chart;
 };
 
 const renderRegimeTimeline = ({ host, dates, regime, regimeNames } = {}) => {
   clearNode(host);
-  if (!Array.isArray(dates) || !Array.isArray(regime) || dates.length !== regime.length) {
+  if (!Array.isArray(dates) || !Array.isArray(regime) || dates.length !== regime.length || regime.length === 0) {
     host.appendChild(createEl("div", { class: "muted" }, ["Regime data unavailable."]));
     return;
   }
@@ -398,16 +422,16 @@ const renderRegimeTimeline = ({ host, dates, regime, regimeNames } = {}) => {
   const svg = document.createElementNS(NS, "svg");
   svg.setAttribute("width", "100%");
   svg.setAttribute("height", "40");
-  svg.setAttribute("viewBox", "0 0 1000 40");
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", "Regime timeline");
+  svg.setAttribute("preserveAspectRatio", "none");
   const g = document.createElementNS(NS, "g");
   svg.appendChild(g);
+  host.appendChild(svg);
 
   const draw = () => {
     while (g.firstChild) g.removeChild(g.firstChild);
-    const w = host.getBoundingClientRect().width;
-    const width = Math.max(320, w);
+    const width = Math.max(320, host.getBoundingClientRect().width || 320);
     svg.setAttribute("viewBox", `0 0 ${width} 40`);
 
     let start = 0;
@@ -442,10 +466,9 @@ const renderRegimeTimeline = ({ host, dates, regime, regimeNames } = {}) => {
     g.appendChild(border);
   };
 
-  const ro = new ResizeObserver(debounce(draw, 200));
+  const throttledDraw = rafThrottle(draw);
+  const ro = new ResizeObserver(throttledDraw);
   ro.observe(host);
   draw();
-  chartCleanups.set(chartKey("regimeTimeline"), () => ro.disconnect());
-  host.appendChild(svg);
+  chartCleanups.set("regimeTimeline", () => ro.disconnect());
 };
-

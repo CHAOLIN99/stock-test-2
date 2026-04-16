@@ -8,18 +8,31 @@ const assert = (cond, message) => {
 
 const debounce = (fn, ms) => {
   let t;
-  return (...args) => {
+  const wrapped = (...args) => {
     clearTimeout(t);
     t = setTimeout(() => fn(...args), ms);
+  };
+  wrapped.cancel = () => clearTimeout(t);
+  return wrapped;
+};
+
+const rafThrottle = (fn) => {
+  let queued = false;
+  let lastArgs;
+  return (...args) => {
+    lastArgs = args;
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      fn(...lastArgs);
+    });
   };
 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-const formatMoney = (v) => {
-  if (v == null || !Number.isFinite(v)) return "—";
-  return `$${Number(v).toFixed(2)}`;
-};
+const formatMoney = (v) => (v != null && Number.isFinite(v)) ? `$${Number(v).toFixed(2)}` : "—";
 
 const formatPct = (v, digits = 1) => {
   if (v == null || !Number.isFinite(v)) return "—";
@@ -38,28 +51,16 @@ const parseISODate = (s) => {
   return Number.isFinite(t) ? t : null;
 };
 
-const deepMerge = (base, patch) => {
-  if (patch === undefined) return base;
-  if (patch === null) return null;
-  if (typeof patch !== "object") return patch;
-  if (base == null || typeof base !== "object") return patch;
-  if (base instanceof Set || patch instanceof Set) return patch;
-  if (Array.isArray(base) || Array.isArray(patch)) return patch;
-  const out = { ...base };
-  for (const [k, v] of Object.entries(patch)) {
-    out[k] = deepMerge(base[k], v);
-  }
-  return out;
-};
-
 const parseRoute = (hash) => {
-  const h = (hash || "").replace(/^#/, "");
-  const parts = h.split("/").filter(Boolean);
+  const parts = (hash || "").replace(/^#/, "").split("/").filter(Boolean);
   if (parts.length === 0) return { name: "overview", params: {} };
-  if (parts[0] === "overview") return { name: "overview", params: {} };
-  if (parts[0] === "compare") return { name: "compare", params: {} };
-  if (parts[0] === "methodology") return { name: "methodology", params: {} };
-  if (parts[0] === "ticker" && parts[1]) return { name: "ticker", params: { symbol: parts[1].toUpperCase() } };
+  const head = parts[0];
+  if (head === "overview" || head === "compare" || head === "methodology") {
+    return { name: head, params: {} };
+  }
+  if (head === "ticker" && parts[1]) {
+    return { name: "ticker", params: { symbol: parts[1].toUpperCase() } };
+  }
   return { name: "overview", params: {} };
 };
 
@@ -83,15 +84,13 @@ const pickBestModel = (metricsByModel) => {
 
 const getQueryParam = (key) => {
   try {
-    const u = new URL(window.location.href);
-    return u.searchParams.get(key);
+    return new URL(window.location.href).searchParams.get(key);
   } catch {
     return null;
   }
 };
 
 const stableHash32 = (s) => {
-  // Deterministic, fast (FNV-1a 32-bit)
   const str = String(s ?? "");
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -106,3 +105,46 @@ const autoColorForKey = (key, { sat = 70, light = 48 } = {}) => {
   return `hsl(${h} ${sat}% ${light}%)`;
 };
 
+const toNumericArray = (arr) => {
+  if (!Array.isArray(arr)) return [];
+  const n = arr.length;
+  const out = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = arr[i];
+    out[i] = (v != null && Number.isFinite(v)) ? Number(v) : null;
+  }
+  return out;
+};
+
+const cumulativeFromLogReturns = (logReturns) => {
+  if (!Array.isArray(logReturns)) return [];
+  const n = logReturns.length;
+  const out = new Array(n);
+  let s = 0;
+  let last = 0;
+  for (let i = 0; i < n; i++) {
+    const r = logReturns[i];
+    if (r == null || !Number.isFinite(r)) {
+      out[i] = last;
+      continue;
+    }
+    s += Number(r);
+    last = Math.exp(s) - 1;
+    out[i] = last;
+  }
+  return out;
+};
+
+const setEquals = (a, b) => {
+  if (a === b) return true;
+  if (!a || !b || a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+};
+
+const arrayEquals = (a, b) => {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+};

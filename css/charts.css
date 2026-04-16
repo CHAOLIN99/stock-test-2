@@ -5,28 +5,18 @@
     border-radius: var(--radius-md);
     padding: 10px;
     overflow: hidden;
+    position: relative;
   }
 
   .chart-frame canvas {
     width: 100% !important;
-    height: auto !important;
+    height: 100% !important;
     display: block;
   }
 
-  .chart-frame--price {
-    min-height: 380px;
-  }
-
-  .chart-frame--rmse {
-    min-height: 280px;
-  }
-
-  .chart-frame--equity {
-    min-height: 300px;
-  }
-
-  .chart-frame--fi {
-    min-height: 420px;
-  }
+  .chart-frame--price { min-height: 380px; }
+  .chart-frame--rmse { min-height: 280px; }
+  .chart-frame--equity { min-height: 300px; }
+  .chart-frame--fi { min-height: 420px; }
+  .chart-frame--mini { min-height: 180px; }
 }
-
