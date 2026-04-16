@@ -56,7 +56,28 @@ SINGLE_TICKER=META python run_experiment.py
 - **Metrics**: `results/results_all.csv`
 - **Per-ticker metadata**: `results/meta_<TICKER>.json`
 - **Charts**: `results/charts/` (price plot; SHAP summary for RandomForest when available)
+- **Dashboard data**: `results/charts_data.json` (offline frontend payload; written atomically)
 - **Report**: `report.md`
+
+## Dashboard (offline frontend)
+
+The dashboard is a self-contained HTML/CSS/JS app (no Node, no build step). It reads `results/charts_data.json`.
+
+1) Generate data (also writes `results/charts_data.json`):
+
+```bash
+python run_experiment.py
+```
+
+2) Start the local server:
+
+```bash
+python server.py
+```
+
+3) Open:
+
+- `http://localhost:8080/dashboard.html`
 
 ## Notes (Mac + Python 3.14)
 

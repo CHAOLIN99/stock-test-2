@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+import json
+import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -210,3 +214,130 @@ def full_metrics_block(
         m["sharpe_vs_bench"] = float("nan")
 
     return m
+
+
+def _to_py(x: Any) -> Any:
+    """Cast numpy/pandas scalars to JSON-safe Python types."""
+    if x is None:
+        return None
+    if isinstance(x, (np.floating,)):
+        v = float(x)
+        return v if np.isfinite(v) else None
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, float):
+        return x if np.isfinite(x) else None
+    if isinstance(x, (str, int, bool)):
+        return x
+    if isinstance(x, (pd.Timestamp,)):
+        return str(x.date())
+    return x
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    os.replace(tmp, path)
+
+
+def strategy_log_returns_from_prices(pred_prices: np.ndarray, actual_next: np.ndarray) -> np.ndarray:
+    """
+    Daily strategy *log* returns derived from the existing price-based signal:
+    long when pred[t] > actual[t-1]. Uses the same transaction cost model as evaluate.py,
+    then converts net simple returns to log returns via log1p.
+    """
+    pred_prices = np.asarray(pred_prices, dtype=float).ravel()
+    actual_next = np.asarray(actual_next, dtype=float).ravel()
+    simple = strategy_returns_from_prices(pred_prices, actual_next)
+    out = np.full_like(simple, np.nan, dtype=float)
+    for i, r in enumerate(simple):
+        if not np.isfinite(r) or r <= -0.999999:
+            out[i] = np.nan
+        else:
+            out[i] = float(np.log1p(r))
+    return out
+
+
+def feature_importance_from_model(model: Any, feature_cols: list[str], top_k: int = 20) -> list[dict[str, Any]]:
+    """
+    Best-effort feature importance:
+    - sklearn trees: feature_importances_
+    - linear models: coef_
+    Returned as [{"feature": str, "importance": float}, ...]
+    """
+    if model is None or not feature_cols:
+        return []
+    imp = None
+    if hasattr(model, "feature_importances_"):
+        try:
+            imp = np.asarray(getattr(model, "feature_importances_"), dtype=float).ravel()
+        except Exception:
+            imp = None
+    elif hasattr(model, "coef_"):
+        try:
+            coef = np.asarray(getattr(model, "coef_"), dtype=float)
+            imp = np.abs(coef).ravel()
+        except Exception:
+            imp = None
+    if imp is None or len(imp) != len(feature_cols):
+        return []
+    imp = np.where(np.isfinite(imp), imp, 0.0)
+    order = np.argsort(-imp)[:top_k]
+    out = []
+    for i in order:
+        v = float(imp[int(i)])
+        if v <= 0:
+            continue
+        out.append({"feature": str(feature_cols[int(i)]), "importance": float(v)})
+    return out
+
+
+def write_dashboard_data(
+    *,
+    tickers: list[str],
+    per_ticker: dict[str, dict[str, Any]],
+    out_dir: str | Path = "results",
+    generated_at: str,
+) -> None:
+    """
+    Write frontend dashboard payloads. This is intentionally file-system oriented
+    and uses atomic replaces to avoid partial writes on crashes.
+
+    Expected per_ticker[ticker] shape matches charts_data.json schema.
+    """
+    out_dir = Path(out_dir)
+    charts_path = out_dir / "charts_data.json"
+    payload = {
+        "tickers": tickers,
+        "generated_at": generated_at,
+        "data": {},
+    }
+    for t in tickers:
+        td = per_ticker.get(t) or {}
+        payload["data"][t] = td
+
+    # also provide split outputs for debugging/optional use
+    fi_payload = {t: (per_ticker.get(t) or {}).get("feature_importance", {}) for t in tickers}
+    reg_payload = {
+        t: {
+            "dates": (per_ticker.get(t) or {}).get("dates", []),
+            "regime": (per_ticker.get(t) or {}).get("regime", []),
+            "regime_names": (per_ticker.get(t) or {}).get("regime_names", []),
+        }
+        for t in tickers
+    }
+
+    # Ensure JSON-safe types
+    def normalize(obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {str(k): normalize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [normalize(v) for v in obj]
+        return _to_py(obj)
+
+    _atomic_write_json(charts_path, normalize(payload))
+    _atomic_write_json(out_dir / "feature_importance.json", normalize(fi_payload))
+    _atomic_write_json(out_dir / "regime_labels.json", normalize(reg_payload))

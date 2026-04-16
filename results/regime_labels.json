@@ -1,0 +1,18 @@
+{
+  "NVDA": {
+    "dates": [
+      "2025-01-02",
+      "2025-01-03"
+    ],
+    "regime": [
+      0,
+      1
+    ],
+    "regime_names": [
+      "bull",
+      "bear",
+      "volatile",
+      "sideways"
+    ]
+  }
+}

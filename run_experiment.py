@@ -6,9 +6,11 @@ Run: python run_experiment.py
 
 from __future__ import annotations
 
+import argparse
 import gc
 import json
 import os
+import sys
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import joblib
 import numpy as np
 import pandas as pd
-import torch
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
@@ -35,22 +36,36 @@ from config import (
     TRAIN_END,
 )
 from sklearn.preprocessing import MinMaxScaler
-from data_pipeline import (
-    build_supervised_frame,
-    download_yahoo,
-    fit_save_scaler,
-    load_fred_features,
-    prepare_univariate_series,
-    set_seeds,
-    train_test_split_df,
-    validate_price_df,
+from evaluate import (
+    bootstrap_metric,
+    feature_importance_from_model,
+    full_metrics_block,
+    rmse_over_mean,
+    strategy_log_returns_from_prices,
+    write_dashboard_data,
 )
-from evaluate import bootstrap_metric, full_metrics_block, rmse_over_mean
-from models import classical as classical_mod
-from models import deep_learning as dl_mod
-from models import ensemble as ens_mod
-from models import hmm_regime as hmm_mod
-from models import timeseries as ts_mod
+try:
+    import torch  # type: ignore
+except Exception:  # allow --help/--list-tickers without heavy deps installed
+    torch = None  # type: ignore
+
+# Imported lazily in main() to avoid import-time failures when dependencies
+# (e.g., torch) are not installed yet.
+classical_mod = None
+dl_mod = None
+ens_mod = None
+hmm_mod = None
+ts_mod = None
+
+# Also imported lazily because data_pipeline depends on yfinance / pandas_datareader etc.
+build_supervised_frame = None
+download_yahoo = None
+fit_save_scaler = None
+load_fred_features = None
+prepare_univariate_series = None
+set_seeds = None
+train_test_split_df = None
+validate_price_df = None
 
 try:
     import matplotlib
@@ -214,7 +229,7 @@ def run_ticker(
     macro: pd.DataFrame,
     bench_close: pd.Series,
     device: torch.device,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Any]]:
     set_seeds()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -477,10 +492,203 @@ def run_ticker(
     with open(RESULTS_DIR / f"meta_{ticker}.json", "w") as f:
         json.dump(meta, f, indent=2, default=str)
 
-    return df_res, meta
+    # --- Dashboard export payload (per-date series) ---
+    def _as_list(a: np.ndarray, n: int) -> List[Optional[float]]:
+        a = np.asarray(a, dtype=float).ravel()
+        out: List[Optional[float]] = []
+        for i in range(n):
+            v = float(a[i]) if i < len(a) and np.isfinite(a[i]) else None
+            out.append(v)
+        return out
+
+    dates = [str(pd.Timestamp(d).date()) for d in idx_test]
+    n = len(dates)
+    actual = _as_list(actual_next, n)
+
+    preds: Dict[str, List[Optional[float]]] = {}
+    # Baselines/TS/HMM already prices
+    preds["Naive"] = _as_list(pred_naive, n)
+    preds["BuyHold"] = _as_list(pred_bh, n)
+    preds["SMA_Cross"] = _as_list(pred_sma, n)
+    preds["HoltWinters"] = _as_list(pred_hw, n)
+    preds["ARIMA"] = _as_list(pred_arima, n)
+    preds["HMM_Regime"] = _as_list(pred_hmm, n)
+
+    # Tier 3 + ensembles are log-return preds; convert to prices
+    for name in TIER3_NAMES:
+        preds[name] = _as_list(prices_from_log_pred(close_at_t, pred_ml[name]), n)
+    for name in ("VotingEnsemble", "StackingEnsemble"):
+        preds[name] = _as_list(prices_from_log_pred(close_at_t, pred_ml[name]), n)
+
+    # DL are already price preds but can be shorter; fill with nulls
+    for dn, arr in pred_dl_test.items():
+        filled = [None] * n
+        m = min(n, len(arr))
+        for i in range(m):
+            v = float(arr[i]) if np.isfinite(arr[i]) else None
+            filled[i] = v
+        preds[dn] = filled
+
+    # Metrics map by model (test metrics only)
+    metrics: Dict[str, Any] = {}
+    for _, r in df_res.iterrows():
+        model = str(r["model"])
+        metrics[model] = {
+            "rmse_mean_test": float(r["rmse_mean_test"]) if pd.notna(r["rmse_mean_test"]) else None,
+            "dir_acc": float(r["dir_acc"]) if pd.notna(r["dir_acc"]) else None,
+            "sharpe": float(r["sharpe"]) if pd.notna(r["sharpe"]) else None,
+            "r2": float(r["r2"]) if pd.notna(r["r2"]) else None,
+            "max_dd": float(r["max_dd"]) if pd.notna(r["max_dd"]) else None,
+        }
+
+    # Strategy log returns (aligned to dates)
+    strat_lr: Dict[str, List[Optional[float]]] = {}
+    for model, arr in preds.items():
+        if arr is None:
+            continue
+        pp = np.array([np.nan if v is None else float(v) for v in arr], dtype=float)
+        ap = np.array([np.nan if v is None else float(v) for v in actual], dtype=float)
+        lr = strategy_log_returns_from_prices(pp, ap)
+        strat_lr[model] = [float(x) if np.isfinite(x) else None for x in lr[:n]]
+
+    # Regime labels (best-effort; 4 regimes)
+    regime = [None] * n
+    regime_names = ["bull", "bear", "volatile", "sideways"]
+    try:
+        from hmmlearn.hmm import GaussianHMM
+        from sklearn.preprocessing import StandardScaler
+
+        c = ohlcv["Close"].astype(float)
+        v = ohlcv["Volume"].astype(float)
+        lr_full = np.log(c / c.shift(1))
+        vc_full = v.pct_change()
+        Xdf = pd.concat([lr_full, vc_full], axis=1, keys=["lr", "vc"]).dropna()
+        Xdf = Xdf.replace([np.inf, -np.inf], np.nan).dropna()
+        train_X = Xdf[Xdf.index <= TRAIN_END]
+        test_X = Xdf.reindex(idx_test).dropna()
+        if len(train_X) > 120 and len(test_X) > 20:
+            sc = StandardScaler()
+            Xs = sc.fit_transform(train_X.values)
+            hmm = GaussianHMM(n_components=4, covariance_type="diag", n_iter=200, random_state=42)
+            hmm.fit(Xs)
+            st_train = hmm.predict(Xs)
+            mu = np.array([np.mean(train_X["lr"].values[st_train == i]) if np.any(st_train == i) else 0.0 for i in range(4)], dtype=float)
+            var = np.array([np.var(train_X["lr"].values[st_train == i]) if np.any(st_train == i) else 0.0 for i in range(4)], dtype=float)
+            bull = int(np.argmax(mu))
+            bear = int(np.argmin(mu))
+            rem = [i for i in range(4) if i not in (bull, bear)]
+            volatile = int(rem[int(np.argmax(var[rem]))]) if rem else bull
+            sideways = int([i for i in range(4) if i not in (bull, bear, volatile)][0]) if len(rem) == 2 else bear
+            mapping = {bull: 0, bear: 1, volatile: 2, sideways: 3}
+            test_states = hmm.predict(sc.transform(test_X.values))
+            state_by_dt = {dt: mapping.get(int(s), 3) for dt, s in zip(test_X.index, test_states)}
+            regime = [state_by_dt.get(dt, None) for dt in idx_test]
+    except Exception:
+        pass
+
+    # Feature importance (best-effort, top-20)
+    fi: Dict[str, Any] = {}
+    for name, model in models_save.items():
+        if name in ("SVR", "MLP"):
+            continue
+        fi_list = feature_importance_from_model(model, feature_cols, top_k=20)
+        if fi_list:
+            fi[name] = fi_list
+
+    dash = {
+        "dates": dates,
+        "actual": actual,
+        "predictions": preds,
+        "metrics": metrics,
+        "regime": regime,
+        "regime_names": regime_names,
+        "feature_importance": fi,
+        "strategy_log_returns": strat_lr,
+    }
+
+    return df_res, meta, dash
 
 
-def main() -> None:
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="run_experiment.py",
+        description="Run the end-to-end stock prediction pipeline and export results + dashboard payload.",
+    )
+    p.add_argument(
+        "--ticker",
+        action="append",
+        default=None,
+        help="Run a single ticker (repeatable). Example: --ticker NVDA. Overrides SINGLE_TICKER env var when provided.",
+    )
+    p.add_argument(
+        "--list-tickers",
+        action="store_true",
+        help="Print supported tickers and exit.",
+    )
+    p.add_argument(
+        "--skip-dashboard",
+        action="store_true",
+        help="Skip writing results/charts_data.json (dashboard payload).",
+    )
+    p.add_argument(
+        "--skip-report",
+        action="store_true",
+        help="Skip generating report.md at the end.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(list(sys.argv[1:] if argv is None else argv))
+    if args.list_tickers:
+        print("Supported tickers:")
+        for t in sorted(TICKERS.keys()):
+            print(" -", t)
+        return 0
+
+    # Late import: data pipeline downloads/reads data and depends on optional packages.
+    global build_supervised_frame, download_yahoo, fit_save_scaler, load_fred_features, prepare_univariate_series
+    global set_seeds, train_test_split_df, validate_price_df
+    try:
+        from data_pipeline import (  # type: ignore
+            build_supervised_frame,
+            download_yahoo,
+            fit_save_scaler,
+            load_fred_features,
+            prepare_univariate_series,
+            set_seeds,
+            train_test_split_df,
+            validate_price_df,
+        )
+    except Exception as e:
+        print(
+            "Missing or broken dependencies for the data pipeline.\n"
+            f"Import error: {e}\n"
+            "Install dependencies first:\n"
+            "  python3 -m venv .venv && source .venv/bin/activate\n"
+            "  pip install -r requirements.txt",
+            file=sys.stderr,
+        )
+        return 2
+
+    if torch is None:
+        print(
+            "Missing dependency: torch.\n"
+            "Install dependencies first (recommended):\n"
+            "  python3 -m venv .venv && source .venv/bin/activate\n"
+            "  pip install -r requirements.txt",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Late imports: these modules depend on torch and other heavy deps.
+    global classical_mod, dl_mod, ens_mod, hmm_mod, ts_mod
+    from models import classical as classical_mod  # type: ignore[assignment]
+    from models import deep_learning as dl_mod  # type: ignore[assignment]
+    from models import ensemble as ens_mod  # type: ignore[assignment]
+    from models import hmm_regime as hmm_mod  # type: ignore[assignment]
+    from models import timeseries as ts_mod  # type: ignore[assignment]
+
     set_seeds()
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -492,29 +700,52 @@ def main() -> None:
 
     device = dl_mod.get_device()
     all_dfs: List[pd.DataFrame] = []
+    dash_all: Dict[str, Dict[str, Any]] = {}
+    cli_tickers = [t.upper() for t in (args.ticker or []) if t]
+    unknown = [t for t in cli_tickers if t not in TICKERS]
+    if unknown:
+        print(f"Unknown ticker(s): {', '.join(unknown)}. Use --list-tickers to see valid values.", file=sys.stderr)
+        return 2
+
     single = os.environ.get("SINGLE_TICKER")
-    tick_iter = (
-        {single: TICKERS[single]}.items()
-        if single and single in TICKERS
-        else TICKERS.items()
-    )
+    if cli_tickers:
+        tick_iter = {t: TICKERS[t] for t in cli_tickers}.items()
+    elif single and single in TICKERS:
+        tick_iter = {single: TICKERS[single]}.items()
+    else:
+        tick_iter = TICKERS.items()
+
     for ticker, sd in tqdm(tick_iter, desc="Tickers"):
-        df_t, _ = run_ticker(ticker, sd, macro, bench_close, device)
+        df_t, _, dash = run_ticker(ticker, sd, macro, bench_close, device)
         all_dfs.append(df_t)
+        dash_all[ticker] = dash
         gc.collect()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
 
     out = pd.concat(all_dfs, ignore_index=True)
     out.to_csv(RESULTS_DIR / "results_all.csv", index=False)
+    if not args.skip_dashboard:
+        try:
+            write_dashboard_data(
+                tickers=list(dash_all.keys()),
+                per_ticker=dash_all,
+                out_dir=RESULTS_DIR,
+                generated_at=pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            print("wrote:", RESULTS_DIR / "charts_data.json")
+        except Exception as e:
+            print("dashboard export skipped:", e)
     print(out.groupby("ticker")["rmse_mean_test"].min())
-    try:
-        from report import generate_report
+    if not args.skip_report:
+        try:
+            from report import generate_report
 
-        generate_report()
-    except Exception as e:
-        print("report skipped:", e)
+            generate_report()
+        except Exception as e:
+            print("report skipped:", e)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

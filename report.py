@@ -4,6 +4,8 @@ Generate report.md from results/results_all.csv and per-ticker metadata.
 
 from __future__ import annotations
 
+import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -11,8 +13,25 @@ import pandas as pd
 from config import RESULTS_DIR, ROOT
 
 
-def generate_report() -> Path:
-    csv_path = RESULTS_DIR / "results_all.csv"
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="report.py", description="Generate report.md from results/results_all.csv.")
+    p.add_argument(
+        "--results-dir",
+        default=str(RESULTS_DIR),
+        help="Directory containing results_all.csv (default: results/).",
+    )
+    p.add_argument(
+        "--out",
+        default=str(ROOT / "report.md"),
+        help="Output markdown path (default: ./report.md).",
+    )
+    return p.parse_args(argv)
+
+
+def generate_report(*, results_dir: str | Path = RESULTS_DIR, out_path: str | Path = ROOT / "report.md") -> Path:
+    results_dir = Path(results_dir)
+    out_path = Path(out_path)
+    csv_path = results_dir / "results_all.csv"
     if not csv_path.exists():
         raise FileNotFoundError(f"Run run_experiment.py first — missing {csv_path}")
 
@@ -91,11 +110,11 @@ def generate_report() -> Path:
         "markets are hard and short out-of-sample windows are noisy.\n"
     )
 
-    out = ROOT / "report.md"
-    out.write_text("\n".join(lines), encoding="utf-8")
-    return out
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
 
 
 if __name__ == "__main__":
-    p = generate_report()
+    args = _parse_args(sys.argv[1:])
+    p = generate_report(results_dir=args.results_dir, out_path=args.out)
     print(f"Wrote {p}")

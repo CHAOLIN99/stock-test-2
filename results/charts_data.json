@@ -1,0 +1,50 @@
+{
+  "tickers": [
+    "NVDA"
+  ],
+  "generated_at": "2025-01-15T10:30:00Z",
+  "data": {
+    "NVDA": {
+      "dates": [
+        "2025-01-02",
+        "2025-01-03"
+      ],
+      "actual": [
+        null,
+        12.3
+      ],
+      "predictions": {
+        "MARS": [
+          null,
+          1.2
+        ]
+      },
+      "metrics": {
+        "MARS": {
+          "rmse_mean_test": null,
+          "dir_acc": 0.5,
+          "sharpe": null,
+          "r2": 0.1,
+          "max_dd": -0.2
+        }
+      },
+      "regime": [
+        0,
+        1
+      ],
+      "regime_names": [
+        "bull",
+        "bear",
+        "volatile",
+        "sideways"
+      ],
+      "feature_importance": {},
+      "strategy_log_returns": {
+        "MARS": [
+          null,
+          0.0
+        ]
+      }
+    }
+  }
+}

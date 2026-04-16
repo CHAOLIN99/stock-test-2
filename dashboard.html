@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Stock Prediction Dashboard (Offline)</title>
+    <link rel="stylesheet" href="./css/styles.css" />
+    <link rel="stylesheet" href="./css/charts.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="app-header" data-component="app-header">
+      <div class="app-header__inner">
+        <div class="brand" aria-label="Dashboard title">
+          <svg class="brand__mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+            <path
+              d="M3 14.5V5.5a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H6.2l-2.4 1.9a.6.6 0 0 1-.98-.47v-1.43H4a1 1 0 0 1-1-1Z"
+              fill="currentColor"
+              opacity="0.9"
+            />
+            <path d="M6 12l2-3 2 2 3-5 1 1-4 7-2-2-2 3-1-1Z" fill="currentColor" />
+          </svg>
+          <div class="brand__text">
+            <div class="brand__title">Stock Prediction</div>
+            <div class="brand__subtitle" id="generatedAt">Loading data…</div>
+          </div>
+        </div>
+
+        <nav class="top-nav" aria-label="Primary">
+          <a class="top-nav__link" href="#/overview" data-nav="overview">Overview</a>
+          <a class="top-nav__link" href="#/compare" data-nav="compare">Compare</a>
+          <a class="top-nav__link" href="#/methodology" data-nav="methodology">Methodology</a>
+        </nav>
+
+        <div class="header-controls" data-component="header-controls">
+          <label class="toggle" for="darkModeToggle">
+            <span class="toggle__label">Dark</span>
+            <input id="darkModeToggle" type="checkbox" role="switch" aria-label="Toggle dark mode" />
+            <span class="toggle__track" aria-hidden="true"></span>
+          </label>
+
+          <label class="toggle" for="regimeToggle">
+            <span class="toggle__label">Regimes</span>
+            <input id="regimeToggle" type="checkbox" role="switch" aria-label="Toggle regime overlay" />
+            <span class="toggle__track" aria-hidden="true"></span>
+          </label>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="app-main">
+      <section class="ticker-bar" data-component="ticker-bar" aria-label="Ticker selector">
+        <div id="tickerPills" class="ticker-bar__pills" role="tablist" aria-label="Tickers"></div>
+        <div class="ticker-bar__right">
+          <div class="date-range" data-component="date-range" aria-label="Date range">
+            <label class="date-range__field">
+              <span class="date-range__label">Start</span>
+              <input id="dateStart" type="date" aria-label="Start date" />
+            </label>
+            <label class="date-range__field">
+              <span class="date-range__label">End</span>
+              <input id="dateEnd" type="date" aria-label="End date" />
+            </label>
+            <button id="dateApply" class="btn btn--secondary" type="button">Apply</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="bannerHost" class="banner-host" aria-live="polite" aria-atomic="true"></section>
+
+      <section id="loadingSkeleton" class="skeleton" data-component="loading" aria-label="Loading state">
+        <div class="skeleton__row">
+          <div class="skeleton__block skeleton__block--lg"></div>
+          <div class="skeleton__block skeleton__block--lg"></div>
+          <div class="skeleton__block skeleton__block--lg"></div>
+        </div>
+        <div class="skeleton__row">
+          <div class="skeleton__block skeleton__block--md"></div>
+          <div class="skeleton__block skeleton__block--md"></div>
+        </div>
+        <div class="skeleton__block skeleton__block--xl"></div>
+      </section>
+
+      <section id="appRoot" class="app-root" hidden>
+        <!-- Overview -->
+        <section id="page-overview" class="page" data-page="overview" hidden>
+          <div class="page__header">
+            <h1 class="h1">Overview</h1>
+            <p class="muted">Cross-ticker performance and directional accuracy summary.</p>
+          </div>
+
+          <div class="grid grid--metrics" id="overviewMetricGrid" aria-label="Overview metric cards"></div>
+
+          <div class="panel">
+            <div class="panel__header">
+              <h2 class="h2">RMSE/mean (test)</h2>
+              <div class="panel__actions">
+                <button id="exportRmsePng" class="btn btn--secondary" type="button">Export PNG</button>
+                <button id="resetRmseZoom" class="btn btn--ghost" type="button" hidden>Reset zoom</button>
+              </div>
+            </div>
+            <div class="chart-frame chart-frame--rmse">
+              <canvas id="rmseChart" height="280" aria-label="RMSE over mean bar chart"></canvas>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel__header">
+              <h2 class="h2">Directional accuracy heatmap</h2>
+              <p class="muted">5 tickers × 14 models. Cells show test directional accuracy.</p>
+            </div>
+            <div class="heatmap" id="dirHeatmap" aria-label="Directional accuracy table"></div>
+          </div>
+        </section>
+
+        <!-- Ticker pages (pre-rendered; hide inactive) -->
+        <section id="page-ticker" class="page" data-page="ticker" hidden>
+          <div id="tickerSections" class="ticker-sections" aria-label="Ticker pages"></div>
+
+          <template id="tickerSectionTemplate">
+            <section class="ticker-section" data-component="ticker-section">
+              <div class="page__header page__header--ticker">
+                <div>
+                  <h1 class="h1" data-role="tickerTitle">Ticker</h1>
+                  <p class="muted" data-role="tickerSubtitle">Prediction performance and diagnostics.</p>
+                </div>
+                <div class="page__header-actions">
+                  <button data-role="exportPricePng" class="btn btn--secondary" type="button">Export PNG</button>
+                  <button data-role="resetPriceZoom" class="btn btn--ghost" type="button" hidden>Reset zoom</button>
+                </div>
+              </div>
+
+              <div class="grid grid--ticker-top">
+                <div class="panel">
+                  <div class="panel__header">
+                    <h2 class="h2">Key metrics (test)</h2>
+                    <p class="muted">Best model is chosen by lowest RMSE/mean (test).</p>
+                  </div>
+                  <div class="grid grid--metrics" data-role="tickerMetricGrid" aria-label="Ticker metric cards"></div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel__header">
+                    <h2 class="h2">Models</h2>
+                    <p class="muted">Select up to 6 models to display. Naive baseline is always shown.</p>
+                  </div>
+                  <div data-role="modelTogglePanel" class="model-panel" aria-label="Model toggle panel"></div>
+                  <div class="model-panel__hint" data-role="modelPanelHint"></div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel__header">
+                  <h2 class="h2">Price prediction</h2>
+                  <p class="muted">Actual next-day price vs model predictions. Gaps mean missing predictions.</p>
+                </div>
+                <div class="chart-frame chart-frame--price">
+                  <canvas data-role="priceChart" height="380" aria-label="Price prediction time series"></canvas>
+                </div>
+              </div>
+
+              <div class="grid grid--ticker-bottom">
+                <div class="panel">
+                  <div class="panel__header">
+                    <h2 class="h2">Equity curves</h2>
+                    <p class="muted">Cumulative return computed from daily log returns (compounded).</p>
+                  </div>
+                  <div class="chart-frame chart-frame--equity">
+                    <canvas data-role="equityChart" height="300" aria-label="Equity curve chart"></canvas>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <div class="panel__header">
+                    <h2 class="h2">Feature importance</h2>
+                    <p class="muted">Top-20 features for the selected best-available model.</p>
+                  </div>
+                  <div class="chart-frame chart-frame--fi">
+                    <canvas data-role="fiChart" height="420" aria-label="Feature importance bar chart"></canvas>
+                  </div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <div class="panel__header">
+                  <h2 class="h2">HMM regime timeline</h2>
+                  <p class="muted">Hover to see regime name, dates, and duration (trading days).</p>
+                </div>
+                <div data-role="regimeTimelineHost" class="regime-timeline" aria-label="Regime timeline"></div>
+              </div>
+            </section>
+          </template>
+        </section>
+
+        <!-- Compare -->
+        <section id="page-compare" class="page" data-page="compare" hidden>
+          <div class="page__header">
+            <h1 class="h1">Compare</h1>
+            <p class="muted">Small multiples for quick cross-ticker visual comparison.</p>
+          </div>
+
+          <div class="grid grid--smalls" id="smallMultiples" aria-label="Mini price charts"></div>
+        </section>
+
+        <!-- Methodology -->
+        <section id="page-methodology" class="page" data-page="methodology" hidden>
+          <div class="page__header">
+            <h1 class="h1">Methodology</h1>
+            <p class="muted">
+              Offline dashboard view of the evaluation outputs. All computations are performed in Python; the browser
+              only formats and renders.
+            </p>
+          </div>
+
+          <div class="panel">
+            <div class="panel__header">
+              <h2 class="h2">System architecture</h2>
+            </div>
+            <div class="methodology">
+              <svg class="arch" viewBox="0 0 880 220" role="img" aria-label="Architecture diagram">
+                <defs>
+                  <linearGradient id="g" x1="0" x2="1">
+                    <stop offset="0" stop-color="currentColor" stop-opacity="0.08" />
+                    <stop offset="1" stop-color="currentColor" stop-opacity="0.02" />
+                  </linearGradient>
+                </defs>
+                <rect x="20" y="30" width="260" height="160" rx="12" fill="url(#g)" stroke="currentColor" stroke-opacity="0.25" />
+                <text x="40" y="60" fill="currentColor" font-size="16" font-weight="600">Python pipeline</text>
+                <text x="40" y="86" fill="currentColor" font-size="13" opacity="0.75">run_experiment.py</text>
+                <text x="40" y="106" fill="currentColor" font-size="13" opacity="0.75">evaluate.py</text>
+                <text x="40" y="126" fill="currentColor" font-size="13" opacity="0.75">results/results_all.csv</text>
+                <text x="40" y="146" fill="currentColor" font-size="13" opacity="0.75">results/charts_data.json</text>
+
+                <rect x="320" y="30" width="240" height="160" rx="12" fill="url(#g)" stroke="currentColor" stroke-opacity="0.25" />
+                <text x="340" y="60" fill="currentColor" font-size="16" font-weight="600">Local server</text>
+                <text x="340" y="86" fill="currentColor" font-size="13" opacity="0.75">server.py</text>
+                <text x="340" y="106" fill="currentColor" font-size="13" opacity="0.75">python server (no-store)</text>
+                <text x="340" y="126" fill="currentColor" font-size="13" opacity="0.75">serves static assets</text>
+
+                <rect x="600" y="30" width="260" height="160" rx="12" fill="url(#g)" stroke="currentColor" stroke-opacity="0.25" />
+                <text x="620" y="60" fill="currentColor" font-size="16" font-weight="600">Browser dashboard</text>
+                <text x="620" y="86" fill="currentColor" font-size="13" opacity="0.75">Vanilla JS (ES2022)</text>
+                <text x="620" y="106" fill="currentColor" font-size="13" opacity="0.75">Chart.js v4 + zoom</text>
+                <text x="620" y="126" fill="currentColor" font-size="13" opacity="0.75">Hash routing</text>
+
+                <path
+                  d="M285 110h35m240 0h35"
+                  stroke="currentColor"
+                  stroke-opacity="0.35"
+                  stroke-width="2"
+                  fill="none"
+                />
+                <path d="M313 110l-8-6v12Z" fill="currentColor" fill-opacity="0.35" />
+                <path d="M593 110l-8-6v12Z" fill="currentColor" fill-opacity="0.35" />
+              </svg>
+
+              <div class="methodology__notes">
+                <h3 class="h3">Guarantees</h3>
+                <ul class="list">
+                  <li>No build step, no Node, no bundler.</li>
+                  <li>Strict chart lifecycle: destroy before re-create; destroy all on route change.</li>
+                  <li>No silent failures: schema validation + visible error banner + retry.</li>
+                  <li>All financial metrics computed in Python; JS only renders.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <div class="app-footer__inner">
+        <div class="muted">Offline dashboard served locally. Data source: <code>results/charts_data.json</code>.</div>
+        <div class="muted">Use keyboard: ticker pills ←/→, model toggles Tab/Space.</div>
+      </div>
+    </footer>
+
+    <!-- Chart.js + plugins (no build step) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
+
+    <!-- App modules (dependency order) -->
+    <script src="./js/utils.js"></script>
+    <script src="./js/data-loader.js"></script>
+    <script src="./js/components.js"></script>
+    <script src="./js/charts.js"></script>
+    <script src="./js/app.js"></script>
+  </body>
+</html>
