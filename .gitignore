@@ -1,0 +1,31 @@
+.DS_Store
+
+# Python
+__pycache__/
+__pycache__
+*.py[cod]
+*.pyd
+.Python
+*.egg-info/
+pip-wheel-metadata/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local data + artifacts
+data/*.parquet
+saved_models/
+results/results_all.csv
+results/meta_*.json
+results/charts/
+report.md
+
+# Logs / temp
+*.log
+*.tmp
