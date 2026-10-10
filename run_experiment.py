@@ -419,8 +419,6 @@ def main(argv: list[str] | None = None) -> int:
         df_t, dash_all[ticker] = run_ticker(ticker, TICKERS[ticker], macro, bench_close, device)
         all_dfs.append(df_t)
         gc.collect()
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
 
     out = pd.concat(all_dfs, ignore_index=True)
     out.to_csv(RESULTS_DIR / "results_all.csv", index=False)

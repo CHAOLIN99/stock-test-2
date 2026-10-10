@@ -24,3 +24,6 @@ env/
 # Logs / temp
 *.log
 *.tmp
+
+# Slurm job logs
+slurm_logs/

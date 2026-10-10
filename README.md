@@ -1,21 +1,19 @@
 # Stock Prediction Dashboard
 
-End-to-end, reproducible next-day price prediction for **META, NVDA, AMD, MSFT, QCOM** (and an `^GSPC` benchmark), with an offline browser dashboard. Runs locally on a MacBook Air (Apple Silicon, MPS) — no paid services, no build step.
+End-to-end, reproducible next-day price prediction for **META, NVDA, AMD, MSFT, QCOM** (and an `^GSPC` benchmark), with an offline browser dashboard. Training runs on the BYU supercomputer (Slurm, see [section 2b](#2b-training-on-the-supercomputer)); the dashboard, prediction server, and Chrome extension run locally. No paid services, no build step.
 
 ---
 
-## 1. Quick start (4 commands)
+## 1. Quick start (local: view results, no training)
 
 ```bash
-cd "/Users/weichao/Desktop/stock test 2"
+git pull                                    # fetch results/ + saved_models/ produced on the supercomputer
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python run_experiment.py && python server.py --open
+python server.py --open
 ```
 
-The fourth command trains every model, writes `results/charts_data.json`, starts the local server, and opens the dashboard at <http://127.0.0.1:8080/dashboard.html>.
-
-> First run downloads daily OHLCV from Yahoo Finance (cached to `data/raw_<TICKER>.parquet`). Subsequent runs load from parquet and are much faster.
+This serves the trained results at <http://127.0.0.1:8080/dashboard.html> and the live prediction API used by the Chrome extension. Training itself runs on the cluster ([section 2b](#2b-training-on-the-supercomputer)).
 
 ---
 
@@ -48,6 +46,27 @@ The fourth command trains every model, writes `results/charts_data.json`, starts
 | `python dl_experiments.py --grid all` | Everything above |
 
 Omit `--ticker` to run all five tickers. Add new variants by editing `GRIDS` in the script. Compare `test_ret_rmse` against `test_zero_ret_rmse` (always predicting a 0% move), and check `test_frac_pred_up` and `test_corr`: a run that predicts "up" on ~100% of days with near-zero correlation has collapsed to the average return.
+
+---
+
+## 2b. Training on the supercomputer
+
+All training runs on the cluster, not locally. Compute nodes may have no internet, so every input (Yahoo prices and FRED macro data) is cached in `data/` and committed to the repo; `fetch_data.py` refreshes it.
+
+```bash
+# on the login node
+git clone https://github.com/CHAOLIN99/stock-test-2.git && cd stock-test-2
+bash scripts/setup.sh                       # uv venv (Python 3.12) + requirements + data caches
+
+sbatch scripts/sbatch_train.sh              # full pipeline, all tickers, one A100 job
+sbatch scripts/sbatch_dl_experiments.sh     # DL sweep; pass a grid name, e.g. ... sbatch_dl_experiments.sh lookback
+
+squeue -u $USER                             # job status; logs in slurm_logs/
+```
+
+When the job finishes, commit and push `results/`, `saved_models/`, and `report.md` from the cluster, then `git pull` locally and run `python server.py --open` to view the dashboard or use the Chrome extension.
+
+Deep-learning models run on CUDA when available (then MPS, then CPU). On Python 3.12 the real XGBoost is used; the `HistGradientBoostingRegressor` stand-in only applies on Python 3.14+.
 
 ---
 
@@ -155,7 +174,7 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 | Browser caches an old version | The server sets `Cache-Control: no-store`, but a hard reload (`⌘⇧R`) forces it. |
 | Port 8080 already in use | `python server.py --port 9000` (or set `PORT=9000`). |
 | `XGBoost segfaulted` on Python 3.14 | Expected — `models/classical.py` transparently substitutes `HistGradientBoostingRegressor` and keeps the label `XGBoost`. |
-| MPS errors on deep-learning models | Device selection in `models/deep_learning.py` falls back to CPU automatically if MPS is unavailable. |
+| Job fails with a network error on a compute node | Run `python fetch_data.py` on the login node so `data/` holds every price and FRED cache. |
 | Regime overlay shows nothing | The ticker's `charts_data.json` must include `regime` + `regime_names`; an empty HMM run leaves them `null`. |
 
 ---
@@ -166,7 +185,10 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 .
 ├── config.py              # tickers, date ranges, hyperparam defaults
 ├── data_pipeline.py       # Yahoo download, FRED macro, feature frames, train/test split
+├── fetch_data.py          # pre-download all inputs into data/ (for offline compute nodes)
 ├── run_experiment.py      # orchestrates training + evaluation + dashboard export
+├── dl_experiments.py      # deep-learning experiment sweeps
+├── scripts/               # setup.sh + Slurm job scripts (sbatch_*.sh)
 ├── evaluate.py            # metric computation (RMSE/mean, dir acc, Sharpe, drawdown, R²)
 ├── report.py              # renders report.md from results/results_all.csv
 ├── server.py              # local server: dashboard files + /api/* prediction routes
@@ -186,8 +208,8 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 │   ├── components.js      # DOM components (diff-updating)
 │   ├── charts.js          # Chart.js wrappers (upsert-in-place)
 │   └── app.js             # state, routing, render dispatch
-├── data/                  # cached parquet
-├── saved_models/          # scalers + torch weights
+├── data/                  # cached prices + FRED parquet
+├── saved_models/          # scalers, Tier-3 and stacking models
 └── results/               # metrics + dashboard payload + static PNG charts
 ```
 

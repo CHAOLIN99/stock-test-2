@@ -23,6 +23,8 @@ from config import BATCH_SIZE, EPOCHS, PATIENCE, RANDOM_SEED
 
 
 def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -116,8 +118,6 @@ def train_seq_model(
     The last `val_frac` of training windows (chronological) drive early stopping.
     """
     torch.manual_seed(RANDOM_SEED)
-    if device.type == "mps":
-        torch.mps.manual_seed(RANDOM_SEED)
 
     W = make_windows(X_all, lookback)
     targets = y_all[lookback - 1 :]
@@ -179,5 +179,7 @@ def cleanup_dl(model: Optional[nn.Module], device: torch.device) -> None:
         return
     del model
     gc.collect()
-    if device.type == "mps":
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
         torch.mps.empty_cache()

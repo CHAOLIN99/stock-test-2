@@ -64,7 +64,7 @@ def _download_prices(ticker: str) -> pd.DataFrame:
 
 def _macro() -> pd.DataFrame:
     end = (pd.Timestamp.today() + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
-    return _cached("macro", MACRO_TTL_S, lambda: load_fred_features(min(TICKERS.values()), end))
+    return _cached("macro", MACRO_TTL_S, lambda: load_fred_features(min(TICKERS.values()), end, use_cache=False))
 
 
 def _models(ticker: str) -> Dict[str, Any]:

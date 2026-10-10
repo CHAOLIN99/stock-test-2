@@ -41,6 +41,7 @@ def download_yahoo(
     start_date: str,
     end_date: str = YF_END,
     cache_path: Optional[Path] = None,
+    refresh: bool = False,
 ) -> Tuple[pd.DataFrame, str]:
     """
     Download OHLCV from Yahoo Finance with auto_adjust=True (Adj Close in 'Close').
@@ -50,7 +51,7 @@ def download_yahoo(
     if cache_path is None:
         cache_path = DATA_DIR / f"raw_{ticker.replace('^', '_')}.parquet"
 
-    if cache_path.exists():
+    if cache_path.exists() and not refresh:
         df = pd.read_parquet(cache_path)
         return df, "parquet_cache"
 
@@ -109,26 +110,27 @@ def clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return df.ffill(limit=2)
 
 
-def load_fred_features(start: str, end: str) -> pd.DataFrame:
-    """
-    Fetch FRED macro series via public graph CSV endpoints (no API key).
-    Forward-fill monthly series to daily.
-    """
-    idx = pd.date_range(start=start, end=end, freq="D")
-    parts: list[pd.DataFrame] = []
+FRED_CACHE = DATA_DIR / "fred_raw.parquet"
+
+
+def download_fred() -> pd.DataFrame:
+    """Fetch raw FRED series via the public graph CSV endpoints (no API key) and cache them."""
+    _ensure_dirs()
+    parts = []
     for sid in FRED_SERIES:
         url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
-        try:
-            with urllib.request.urlopen(url, timeout=60) as resp:
-                raw = resp.read().decode("utf-8", errors="replace")
-            s = pd.read_csv(io.StringIO(raw), index_col=0, parse_dates=True)
-            s = s.rename(columns={s.columns[0]: sid})
-            s[sid] = pd.to_numeric(s[sid], errors="coerce")
-        except (urllib.error.URLError, ValueError, pd.errors.ParserError):
-            s = pd.DataFrame(index=idx, columns=[sid], dtype=float)
-        parts.append(s)
-
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            s = pd.read_csv(io.StringIO(resp.read().decode("utf-8")), index_col=0, parse_dates=True)
+        parts.append(pd.to_numeric(s.iloc[:, 0], errors="coerce").rename(sid))
     fred = pd.concat(parts, axis=1).sort_index()
+    fred.to_parquet(FRED_CACHE)
+    return fred
+
+
+def load_fred_features(start: str, end: str, use_cache: bool = True) -> pd.DataFrame:
+    """Daily macro features (monthly series forward-filled). Uses data/fred_raw.parquet when present."""
+    fred = pd.read_parquet(FRED_CACHE) if use_cache and FRED_CACHE.exists() else download_fred()
+    idx = pd.date_range(start=start, end=end, freq="D")
     # CPI is monthly: 12 observations = one year (must be computed before daily reindexing)
     fred["CPIAUCSL_yoy"] = fred["CPIAUCSL"].dropna().pct_change(periods=12) * 100.0
     return fred.reindex(idx).ffill()
@@ -269,12 +271,7 @@ def prepare_univariate_series(
 
 
 def set_seeds() -> None:
-    np.random.seed(RANDOM_SEED)
-    try:
-        import torch
+    import torch
 
-        torch.manual_seed(RANDOM_SEED)
-        if torch.backends.mps.is_available():
-            torch.mps.manual_seed(RANDOM_SEED)
-    except ImportError:
-        pass
+    np.random.seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
