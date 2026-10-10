@@ -18,13 +18,8 @@ pip-wheel-metadata/
 venv/
 env/
 
-# Local data + artifacts
-data/*.parquet
-saved_models/
-results/results_all.csv
-results/meta_*.json
-results/charts/
-report.md
+# Tool settings
+.claude/
 
 # Logs / temp
 *.log

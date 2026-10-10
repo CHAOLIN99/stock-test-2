@@ -1,0 +1,15 @@
+{
+  "ticker": "META",
+  "data_source": "parquet_cache",
+  "n_train": 2975,
+  "n_test": 314,
+  "voting_top3": [
+    "RandomForest",
+    "Ridge",
+    "MARS"
+  ],
+  "adf_kpss": {
+    "adf_p": 0.0,
+    "kpss_p": 0.1
+  }
+}
