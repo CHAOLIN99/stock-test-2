@@ -72,6 +72,36 @@ Append a `data` query param: `dashboard.html?data=/path/to/other_charts_data.jso
 
 ---
 
+## 3b. Chrome extension (Investopedia simulator helper)
+
+`chrome-extension/` is a Manifest V3 extension that shows live next-day forecasts in your browser. It talks to the same local server, which now also exposes a JSON API.
+
+**Setup (one time):**
+
+1. Start the server: `source .venv/bin/activate && python server.py`
+2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select the `chrome-extension/` folder.
+3. Pin **Stock Predictor** from the puzzle-piece menu.
+
+**Using it:**
+
+- Click the toolbar icon to see a forecast for any covered ticker.
+- On any `https://www.investopedia.com/simulator/*` page, a panel appears in the bottom-right corner. If the page shows a covered ticker (in the URL, a symbol input, or a heading), the panel switches to it automatically. Click the panel header to collapse it.
+- If you run the server on another port, change the URL under **Server settings** in the popup.
+
+**What the forecast means:** the server downloads fresh daily prices and FRED macro data, rebuilds the 39 training features, and runs the saved Tier-3 models plus the stacking ensemble on the latest trading day. The headline number is the stacking ensemble. **BUY/SELL** appears only when it expects a move over 0.25% *and* at least 5 of 8 models agree (at most 3 of 8 for SELL); otherwise **HOLD**. Backtest hit-rate and regime come from the last `run_experiment.py` run. Only the five trained tickers are covered; others return "not covered". This is educational output, not financial advice.
+
+**API:**
+
+| Route | Returns |
+| --- | --- |
+| `GET /api/health` | `{"ok": true}` |
+| `GET /api/tickers` | Covered tickers |
+| `GET /api/predict/<TICKER>` | Live forecast, per-model forecasts, backtest stats |
+
+Prices are cached for 15 minutes and macro data for 6 hours, so the first request for a ticker takes a few seconds and later ones are instant.
+
+---
+
 ## 4. What gets produced
 
 | Path | Purpose |
@@ -125,7 +155,9 @@ Append a `data` query param: `dashboard.html?data=/path/to/other_charts_data.jso
 ├── run_experiment.py      # orchestrates training + evaluation + dashboard export
 ├── evaluate.py            # metric computation (RMSE/mean, dir acc, Sharpe, drawdown, R²)
 ├── report.py              # renders report.md from results/results_all.csv
-├── server.py              # local static server (no-store headers, CORS opt-in)
+├── server.py              # local server: dashboard files + /api/* prediction routes
+├── predict_service.py     # live next-day forecasts from saved models
+├── chrome-extension/      # MV3 extension: popup + Investopedia simulator panel
 ├── models/
 │   ├── classical.py       # Ridge, MARS, RF, SVR, MLP, XGBoost, LightGBM
 │   ├── deep_learning.py   # RNN / LSTM variants (PyTorch)
