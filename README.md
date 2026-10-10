@@ -21,8 +21,10 @@ This serves the trained results at <http://127.0.0.1:8080/dashboard.html> and a 
 
 | Goal | Command |
 | --- | --- |
+| Download any missing price/FRED caches | `python fetch_data.py` |
+| Re-download all prices and FRED data | `python fetch_data.py --refresh` |
 | Run all 5 tickers + write report | `python run_experiment.py` |
-| Run a single ticker (faster) | `python run_experiment.py --ticker NVDA` |
+| Run a single ticker (faster; see note below) | `python run_experiment.py --ticker NVDA` |
 | List supported tickers | `python run_experiment.py --list-tickers` |
 | Skip dashboard payload | `python run_experiment.py --skip-dashboard` |
 | Skip report regeneration | `python run_experiment.py --skip-report` |
@@ -30,6 +32,8 @@ This serves the trained results at <http://127.0.0.1:8080/dashboard.html> and a 
 | Start the dashboard server | `python server.py` |
 | Start & open the browser | `python server.py --open` |
 | Use a different port | `python server.py --port 9000` |
+
+`--ticker` runs overwrite `results/results_all.csv`, `results/charts_data.json`, and `report.md` with only the tickers in that run. Use them for quick checks, and do a full run before committing results.
 
 ### Deep-learning experiments
 
@@ -51,12 +55,14 @@ Omit `--ticker` to run all five tickers. Add new variants by editing `GRIDS` in 
 
 ## 2b. Training on the supercomputer
 
-All training runs on the cluster, not locally. Compute nodes may have no internet, so every input (Yahoo prices and FRED macro data) is cached in `data/` and committed to the repo; `fetch_data.py` refreshes it.
+All training runs on the cluster, not locally. Compute nodes may have no internet, so every input (Yahoo prices and FRED macro data) is cached in `data/` and committed to the repo. Training uses exactly what is in `data/`; nothing is downloaded during a job.
+
+**Refreshing data before a run.** `scripts/setup.sh` only downloads files that are missing, so it keeps the committed caches as they are. To extend the test window to the latest trading day, run `python fetch_data.py --refresh` (locally or on the login node), then commit and push `data/` before submitting the job.
 
 ```bash
 # on the login node
-git clone https://github.com/CHAOLIN99/stock-test-2.git && cd stock-test-2
-bash scripts/setup.sh                       # uv venv (Python 3.12) + requirements + data caches
+git clone https://github.com/CHAOLIN99/stock-test-2.git && cd stock-test-2   # or: git pull
+bash scripts/setup.sh                       # uv venv (Python 3.12) + requirements + any missing data caches
 
 sbatch scripts/sbatch_train.sh              # full pipeline, all tickers, one A100 job
 sbatch scripts/sbatch_dl_experiments.sh     # DL sweep; pass a grid name, e.g. ... sbatch_dl_experiments.sh lookback
@@ -67,6 +73,8 @@ squeue -u $USER                             # job status; logs in slurm_logs/
 When the job finishes, commit and push `results/`, `saved_models/`, and `report.md` from the cluster, then `git pull` locally and run `python server.py --open` to view the dashboard.
 
 Deep-learning models run on CUDA when available (then MPS, then CPU). On Python 3.12 the real XGBoost is used; the `HistGradientBoostingRegressor` stand-in only applies on Python 3.14+.
+
+**After changing features** (anything in `data_pipeline.py`), retrain before using the prediction API: the saved scalers and models expect the feature set they were trained on.
 
 ---
 
@@ -101,13 +109,13 @@ Open `http://127.0.0.1:8080/dashboard.html`. The URL's hash decides the page, so
 
 ### Loading a different dataset
 
-Append a `data` query param: `dashboard.html?data=/path/to/other_charts_data.json`. The file must match the schema described in [`results/charts_data.json`](results/charts_data.json).
+Append a `data` query param: `dashboard.html?data=/results/other_charts_data.json`. The file must match the schema of [`results/charts_data.json`](results/charts_data.json) and live under `results/`, because the server only serves `dashboard.html`, `css/`, `js/`, and `results/`.
 
 ---
 
 ## 3b. Prediction API
 
-`python server.py` also exposes a JSON API for live next-day forecasts.
+`python server.py` also exposes a JSON API for live next-day forecasts. The server binds to `127.0.0.1` by default and, when bound to loopback, rejects requests whose `Host` header isn't `localhost`/`127.0.0.1` (DNS-rebinding protection). It needs internet access, and `saved_models/` must come from a training run on the current feature set.
 
 **What the forecast means:** the server downloads fresh daily prices and FRED macro data, rebuilds the 35 training features, and runs the saved Tier-3 models plus the stacking ensemble on the latest trading day. The headline number is the stacking ensemble. **BUY/SELL** appears only when it expects a move over 0.25% *and* at least 5 of 8 models agree (at most 3 of 8 for SELL); otherwise **HOLD**. Backtest hit-rate and regime come from the last `run_experiment.py` run. Only the five trained tickers are covered; others return "not covered". This is educational output, not financial advice.
 
@@ -127,9 +135,11 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 
 | Path | Purpose |
 | --- | --- |
-| `data/raw_<TICKER>.parquet` | Cached Yahoo Finance OHLCV |
+| `data/raw_<TICKER>.parquet` | Cached Yahoo Finance OHLCV (`raw__GSPC.parquet` is the S&P 500 benchmark) |
+| `data/fred_raw.parquet` | Cached FRED macro series |
 | `saved_models/` | Fitted scalers, Tier-3 models, and stacking meta-models (joblib) |
-| `results/results_all.csv` | Long-form metrics per (ticker × model × split) |
+| `results/results_all.csv` | Long-form metrics, one row per (ticker × model) on the test window |
+| `results/dl_experiments.csv`, `results/dl_curves/` | Deep-learning sweep results and per-epoch loss curves |
 | `results/meta_<TICKER>.json` | Per-ticker pipeline metadata (hyperparams, runtime) |
 | `results/charts/` | Static matplotlib charts (price, SHAP when available) |
 | `results/charts_data.json` | **Dashboard payload** — the only file the frontend reads |
@@ -141,10 +151,33 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 
 - **Baselines (Tier 0):** Naive (tomorrow = today's close), Buy & Hold, SMA 50/200 cross
 - **Classical (Tier 1–2):** Holt–Winters, ARIMA on log returns
-- **Multivariate ML (Tier 3):** Ridge, MARS (if `pyearth` available), RandomForest, SVR (row-capped), MLP, XGBoost-like, LightGBM
-- **Deep learning (Tier 4):** RNN, LSTM-A, LSTM-B, BiLSTM (PyTorch, MPS if available). Each predicts the next-day log return from a 7-day window of the same 35 scaled features as Tier 3, one step ahead from observed data. Early stopping uses the last 15% of the training period as a chronological validation set and restores the best weights.
+- **Multivariate ML (Tier 3):** Ridge, MARS, RandomForest, SVR (fit on the most recent 2,000 rows), MLP, XGBoost, LightGBM. Each predicts the next-day log return from the 35 features below, with out-of-fold predictions from a 5-split `TimeSeriesSplit`. `pyearth` doesn't install on Python 3.12, so **MARS falls back to Ridge** and its results match Ridge's.
+- **Deep learning (Tier 4):** RNN, LSTM-A, LSTM-B, BiLSTM (PyTorch; CUDA, then MPS, then CPU). Each predicts the next-day log return from a 7-day window of the same 35 scaled features as Tier 3, one step ahead from observed data. Early stopping uses the last 15% of the training period as a chronological validation set and restores the best weights.
 - **HMM:** `GaussianHMM` regime labels + regime-conditional next-day forecast
 - **Ensembles (Tier 5):** weighted voting (top-3 by OOF RMSE), stacking (Ridge meta-learner)
+
+### Features
+
+35 inputs per trading day, built in `data_pipeline.py`, all scale-free (returns, ratios, or % of price) so that test-period values stay inside the training range even after large price moves. Raw prices, volume, and the CPI index level stay in the frame for targets and charts but are not model inputs. A `MinMaxScaler` is fit on the training period only.
+
+| Group | Features |
+| --- | --- |
+| Day-t bar (known at the close) | `ret_0d`, `oc_ret` (open→close), `hl_range` (high/low), `vol_chg` |
+| Lagged returns | `ret_1d`, `ret_5d`, `ret_21d` |
+| Trend | `close_over_SMA_{10,20,50,200}`, `close_over_EMA_{12,26}`, `MACD_{line,signal,hist}_pct` |
+| Momentum / volatility | `RSI_14`, `BB_width`, `ATR_14_pct`, `realized_vol_21`, `pct_52w_high`, `pct_52w_low` |
+| Volume | `OBV_20d`, `vol_ratio`, `vol_z` |
+| Calendar | `dow`, `month`, `is_month_end`, `is_quarter_end` |
+| Macro (FRED) | `FEDFUNDS`, `T10Y2Y`, `VIXCLS`, `UNRATE`, `DGS10`, `CPIAUCSL_yoy` |
+
+**No look-ahead:** rolling indicators are shifted one day. Monthly FRED series (fed funds, unemployment, CPI) are dated at the start of their reference month but published weeks later, so they are lagged 45 days to their approximate release date. Daily FRED series are used as of each trading day.
+
+### Targets and metrics
+
+- **Regression target:** `y_reg = log(close[t+1] / close[t])`. Price forecasts are `close[t] · exp(prediction)`.
+- **Primary metric:** test RMSE / mean price, with a 95% bootstrap interval (200 resamples).
+- **Direction:** `dir_acc` is next-day sign agreement. `cls_*` scores the sign of each model's next-day forecast against the 5-day direction `sign(close[t+5] − close[t])`.
+- **Trading:** long when the forecast is above today's close, 0.1% cost per position change; reports annualized return, Sharpe, max drawdown, Calmar, and Sharpe of excess returns over the S&P 500 on the same day.
 
 ### Train / test splits
 
@@ -163,6 +196,9 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 | Port 8080 already in use | `python server.py --port 9000` (or set `PORT=9000`). |
 | `XGBoost segfaulted` on Python 3.14 | Expected — `models/classical.py` transparently substitutes `HistGradientBoostingRegressor` and keeps the label `XGBoost`. |
 | Job fails with a network error on a compute node | Run `python fetch_data.py` on the login node so `data/` holds every price and FRED cache. |
+| `/api/predict/...` returns `Feature mismatch: built N, scaler expects M` | `saved_models/` predates a feature change. Retrain (`sbatch scripts/sbatch_train.sh`) and pull the new models. |
+| A file under `data/` or `saved_models/` returns 404 in the browser | Intentional — the server only serves `dashboard.html`, `css/`, `js/`, and `results/`. |
+| Test window ends months ago | The cached prices are stale. Run `python fetch_data.py --refresh` and commit `data/`. |
 | Regime overlay shows nothing | The ticker's `charts_data.json` must include `regime` + `regime_names`; an empty HMM run leaves them `null`. |
 
 ---
@@ -172,7 +208,7 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 ```
 .
 ├── config.py              # tickers, date ranges, hyperparam defaults
-├── data_pipeline.py       # Yahoo download, FRED macro, feature frames, train/test split
+├── data_pipeline.py       # Yahoo download, FRED macro (release-lagged), 35 features, train/test split
 ├── fetch_data.py          # pre-download all inputs into data/ (for offline compute nodes)
 ├── run_experiment.py      # orchestrates training + evaluation + dashboard export
 ├── dl_experiments.py      # deep-learning experiment sweeps
