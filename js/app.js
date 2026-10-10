@@ -24,13 +24,10 @@ let _state = {
   darkMode: false,
   regimeOverlay: false,
   _abortSignal: null,
-  _modelHint: "",
 };
 
 let _dirty = 0;
 let _paintQueued = false;
-
-const getState = () => _state;
 
 const markDirty = (flags) => {
   _dirty |= flags;
@@ -239,14 +236,12 @@ const initControls = (abortSignal) => {
   }, 200);
   dom.dateApply.addEventListener("click", applyDate, { signal: abortSignal });
 
-  // Enter key on date inputs applies range.
   const onDateEnter = (e) => { if (e.key === "Enter") applyDate(); };
   dom.dateStart.addEventListener("keydown", onDateEnter, { signal: abortSignal });
   dom.dateEnd.addEventListener("keydown", onDateEnter, { signal: abortSignal });
 
   dom.exportRmsePng.addEventListener("click", () => exportChartPng("rmse", "rmse"), { signal: abortSignal });
 
-  // Sticky-header shadow on scroll.
   const onScroll = rafThrottle(() => {
     const scrolled = window.scrollY > 4;
     document.documentElement.classList.toggle("is-scrolled", scrolled);
@@ -427,7 +422,6 @@ const renderTickerFull = (ticker) => {
     showBanner({ host: dom.bannerHost, message: `Ticker ${ticker} not found in loaded dataset.` });
     return;
   }
-  const td = sliceByDateRange(td0, _state.dateRange, ticker);
 
   const best = data._meta.perTicker[ticker].bestModel;
   const bm = best ? td0.metrics?.[best] : null;
@@ -439,105 +433,66 @@ const renderTickerFull = (ticker) => {
       { keyLabel: "Dir Acc", valueText: (bm?.dir_acc != null && Number.isFinite(bm.dir_acc)) ? `${(bm.dir_acc * 100).toFixed(1)}%` : "—", subText: "Test" },
       { keyLabel: "Sharpe", valueText: formatNum(bm?.sharpe, 2), subText: "Strategy" },
       { keyLabel: "R²", valueText: formatNum(bm?.r2, 2), subText: "Test" },
-      { keyLabel: "Max DD", valueText: (bm?.max_dd != null && Number.isFinite(bm.max_dd)) ? formatPct(bm.max_dd, 1) : "—", subText: "Strategy" },
+      { keyLabel: "Max DD", valueText: formatPct(bm?.max_dd, 1), subText: "Strategy" },
       { keyLabel: "Best model", valueText: best ?? "—", subText: "Lowest RMSE/mean" },
     ],
   });
 
-  const availableModels = data._meta.perTicker?.[ticker]?.models || Object.keys(td0.predictions || {});
-  const modelGroups = buildModelGroups(availableModels);
-  renderModelTogglePanel({
-    host: refs.modelPanel,
-    modelGroups,
-    activeSet: _state.activeModels,
-    onToggle: (m) => {
-      const cur = new Set(_state.activeModels);
-      if (cur.has(m)) cur.delete(m);
-      else cur.add(m);
-      if (cur.size > 6) {
-        refs.modelHint.textContent = "Max 6 models visible. Deselect one to add another.";
-        _state._modelHint = refs.modelHint.textContent;
-        return;
-      }
-      refs.modelHint.textContent = "";
-      _state._modelHint = "";
-      setState({ activeModels: cur });
-    },
-    abortSignal: _state._abortSignal,
-  });
-  refs.modelHint.textContent = _state._modelHint || "";
-
-  renderPriceChart({
-    key: "price",
-    canvas: refs.priceCanvas,
-    tickerData: td,
-    modelSet: _state.activeModels,
-    regimeOverlay: _state.regimeOverlay,
-    resetButton: refs.resetPriceZoomBtn,
-  });
-
-  renderEquityChart({ canvas: refs.equityCanvas, tickerData: td, modelSet: _state.activeModels });
-
-  const pref = [best, ...Array.from(_state.activeModels)].filter(Boolean);
-  renderFeatureImportance({ canvas: refs.fiCanvas, tickerData: td0, modelPreference: pref });
-
+  renderTickerModels(ticker);
   destroyChart("regimeTimeline");
   renderRegimeTimeline({ host: refs.regimeHost, dates: td0.dates, regime: td0.regime, regimeNames: td0.regime_names });
 };
 
-const renderTickerModels = (ticker) => {
-  // Only datasets on price + equity charts change; toggle chip aria-pressed.
+const MAX_VISIBLE_MODELS = 6;
+
+const toggleModel = (refs, m) => {
+  const cur = new Set(_state.activeModels);
+  if (cur.has(m)) cur.delete(m);
+  else cur.add(m);
+  if (cur.size > MAX_VISIBLE_MODELS) {
+    refs.modelHint.textContent = `Max ${MAX_VISIBLE_MODELS} models visible. Deselect one to add another.`;
+    return;
+  }
+  refs.modelHint.textContent = "";
+  setState({ activeModels: cur });
+};
+
+const renderTickerPrice = (ticker) => {
   const refs = tickerDom.get(ticker);
   const td0 = _state.data?.data?.[ticker];
   if (!refs || !td0) return;
-  const td = sliceByDateRange(td0, _state.dateRange, ticker);
+  renderPriceChart({
+    key: "price",
+    canvas: refs.priceCanvas,
+    tickerData: sliceByDateRange(td0, _state.dateRange, ticker),
+    modelSet: _state.activeModels,
+    regimeOverlay: _state.regimeOverlay,
+    resetButton: refs.resetPriceZoomBtn,
+  });
+};
+
+/** Everything that depends on the selected model set: chips, price, equity, feature importance. */
+const renderTickerModels = (ticker) => {
+  const refs = tickerDom.get(ticker);
+  const td0 = _state.data?.data?.[ticker];
+  if (!refs || !td0) return;
+  const meta = _state.data._meta.perTicker[ticker];
 
   renderModelTogglePanel({
     host: refs.modelPanel,
-    modelGroups: buildModelGroups(_state.data._meta.perTicker[ticker].models),
+    modelGroups: buildModelGroups(meta.models),
     activeSet: _state.activeModels,
-    onToggle: (m) => {
-      const cur = new Set(_state.activeModels);
-      if (cur.has(m)) cur.delete(m);
-      else cur.add(m);
-      if (cur.size > 6) {
-        refs.modelHint.textContent = "Max 6 models visible. Deselect one to add another.";
-        return;
-      }
-      refs.modelHint.textContent = "";
-      setState({ activeModels: cur });
-    },
+    onToggle: (m) => toggleModel(refs, m),
     abortSignal: _state._abortSignal,
   });
-
-  renderPriceChart({
-    key: "price",
-    canvas: refs.priceCanvas,
-    tickerData: td,
+  renderTickerPrice(ticker);
+  renderEquityChart({
+    canvas: refs.equityCanvas,
+    tickerData: sliceByDateRange(td0, _state.dateRange, ticker),
     modelSet: _state.activeModels,
-    regimeOverlay: _state.regimeOverlay,
-    resetButton: refs.resetPriceZoomBtn,
   });
-  renderEquityChart({ canvas: refs.equityCanvas, tickerData: td, modelSet: _state.activeModels });
-
-  const best = _state.data._meta.perTicker[ticker].bestModel;
-  const pref = [best, ...Array.from(_state.activeModels)].filter(Boolean);
+  const pref = [meta.bestModel, ...Array.from(_state.activeModels)].filter(Boolean);
   renderFeatureImportance({ canvas: refs.fiCanvas, tickerData: td0, modelPreference: pref });
-};
-
-const renderTickerRegime = (ticker) => {
-  const refs = tickerDom.get(ticker);
-  const td0 = _state.data?.data?.[ticker];
-  if (!refs || !td0) return;
-  const td = sliceByDateRange(td0, _state.dateRange, ticker);
-  renderPriceChart({
-    key: "price",
-    canvas: refs.priceCanvas,
-    tickerData: td,
-    modelSet: _state.activeModels,
-    regimeOverlay: _state.regimeOverlay,
-    resetButton: refs.resetPriceZoomBtn,
-  });
 };
 
 /* -------------------- render: compare -------------------- */
@@ -546,7 +501,6 @@ const renderCompare = () => {
   const { data } = _state;
   if (!data) return;
 
-  // Ensure one panel per ticker; keep DOM stable.
   const existing = new Map();
   for (const panel of dom.smallMultiples.children) existing.set(panel.dataset.ticker, panel);
 
@@ -581,7 +535,6 @@ const renderCompare = () => {
     });
   }
 
-  // Remove panels for removed tickers.
   for (const [t, panel] of existing) {
     destroyChart(`compare_${t}`);
     panel.remove();
@@ -589,13 +542,6 @@ const renderCompare = () => {
 };
 
 /* -------------------- paint: dispatch by dirty flags -------------------- */
-
-const _pageCharts = Object.freeze({
-  overview: ["rmse"],
-  ticker: ["price", "equity", "fi", "regimeTimeline"],
-  compare: null, // dynamic keys prefixed with "compare_"
-  methodology: [],
-});
 
 let _currentPage = null;
 
@@ -638,7 +584,7 @@ const paint = () => {
     } else if (flags & DIRTY.MODELS) {
       renderTickerModels(ticker);
     } else if (flags & DIRTY.REGIME) {
-      renderTickerRegime(ticker);
+      renderTickerPrice(ticker);
     }
     applyTickerVisibility(ticker);
     return;
@@ -691,7 +637,6 @@ const boot = async () => {
       const current = _state.activeTicker;
       const initialTicker = tickers.includes(current) ? current : tickers[0];
 
-      // Pre-create the initial ticker section only (others created on demand).
       ensureTickerSection(initialTicker);
       renderPills(tickers, initialTicker);
 

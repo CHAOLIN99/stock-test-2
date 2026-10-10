@@ -135,10 +135,7 @@ const renderModelTogglePanel = ({ host, modelGroups, activeSet, onToggle, abortS
       ]);
       const chips = createEl("div", { class: "model-group__chips" });
       for (const m of g.models) {
-        const color =
-          (typeof modelColor === "function" && modelColor(m)) ||
-          (typeof MODEL_COLORS === "object" && MODEL_COLORS?.[m]) ||
-          autoColorForKey(m);
+        const color = modelColor(m) || autoColorForKey(m);
         const chip = createEl(
           "button",
           {
@@ -149,7 +146,7 @@ const renderModelTogglePanel = ({ host, modelGroups, activeSet, onToggle, abortS
             dataset: { model: m },
           },
           [
-            createEl("span", { class: "chip__swatch", style: `background:${color ?? "transparent"}` }),
+            createEl("span", { class: "chip__swatch", style: `background:${color}` }),
             createEl("span", { class: "chip__label" }, [m]),
           ]
         );

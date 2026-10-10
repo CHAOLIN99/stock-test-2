@@ -12,6 +12,12 @@ import pandas as pd
 
 from config import RESULTS_DIR, ROOT
 
+REPORT_COLUMNS = [
+    "model", "rmse_mean_train", "rmse_mean_test", "bootstrap_rmse_low", "bootstrap_rmse_high",
+    "mae", "rmse_dollar", "r2", "dir_acc", "ic", "icir", "cls_acc", "cls_f1", "cls_auc",
+    "ann_return", "sharpe", "max_dd", "calmar", "sharpe_vs_bench",
+]
+
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="report.py", description="Generate report.md from results/results_all.csv.")
@@ -36,47 +42,26 @@ def generate_report(*, results_dir: str | Path = RESULTS_DIR, out_path: str | Pa
         raise FileNotFoundError(f"Run run_experiment.py first — missing {csv_path}")
 
     df = pd.read_csv(csv_path)
-    lines: list[str] = []
-    lines.append("# Stock price prediction — out-of-sample 2025+ report\n")
-    lines.append("## Methodology\n")
-    lines.append(
-        "- **Data**: Yahoo Finance (Adj Close via `auto_adjust=True`), FRED macro features for multivariate ML.\n"
-    )
-    lines.append(
-        "- **Split**: train through 2024-12-31 (META from IPO window); test from 2025-01-01 onward.\n"
-    )
-    lines.append(
-        "- **Primary metric**: RMSE / mean(|Adj Close|) on the test window; bootstrap 95% CIs (n=200).\n"
-    )
-    lines.append(
-        "- **Naive baseline**: tomorrow's close = today's close (persistence).\n"
-    )
-    lines.append(
+    lines = [
+        "# Stock price prediction — out-of-sample 2025+ report\n",
+        "## Methodology\n",
+        "- **Data**: Yahoo Finance (Adj Close via `auto_adjust=True`), FRED macro features for multivariate ML.",
+        "- **Split**: train through 2024-12-31 (META from IPO window); test from 2025-01-01 onward.",
+        "- **Primary metric**: RMSE / mean(|Adj Close|) on the test window; bootstrap 95% CIs (n=200).",
+        "- **Naive baseline**: tomorrow's close = today's close (persistence).",
         "- **Deep learning**: RNN / LSTM / BiLSTM predict the next-day log return from a 7-day window of the "
         "same 39 scaled features as Tier 3, one step ahead from observed data; early stopping on a chronological "
-        "validation set (last 15% of training) with best-weight restore.\n"
-    )
-    lines.append(
-        "- **Secondary**: 5-day direction uses a 5-step chain of one-day log-return forecasts for Tier-3 models.\n"
-    )
-    lines.append(
-        "- **Implementation note**: On Python 3.14+, the XGBoost wheel can segfault on some real feature matrices; "
-        "the code uses `sklearn.ensemble.HistGradientBoostingRegressor` with comparable depth/iterations as a "
-        "histogram-boosting stand-in (same `XGBoost` label in outputs).\n"
-    )
-    lines.append("\n## Limitations (required)\n")
-    lines.append(
-        "- **ARIMA / HW**: Gaussian innovations assumption; volatility clustering in tech stocks violates constant variance.\n"
-    )
-    lines.append(
-        "- **ANN / LSTM**: Black-box risk per Polamuri et al.; mitigated partially via SHAP on tree models.\n"
-    )
-    lines.append(
-        "- **RNN**: Vanishing gradients limit effective memory to ~10 steps despite longer lookback windows.\n"
-    )
-    lines.append(
-        "- **All models**: No news, earnings surprises, or macro shock dummies — structural breaks remain unexplained.\n"
-    )
+        "validation set (last 15% of training) with best-weight restore.",
+        "- **Secondary**: 5-day direction is the sign of the sum of five consecutive one-day log-return "
+        "forecasts from the Tier-3 models.",
+        "- **Implementation note**: on Python 3.14+ the XGBoost wheel can segfault, so `XGBoost` is backed by "
+        "`sklearn.ensemble.HistGradientBoostingRegressor` with comparable depth/iterations.",
+        "\n## Limitations\n",
+        "- **ARIMA / HW**: Gaussian innovations assumption; volatility clustering in tech stocks violates constant variance.",
+        "- **ANN / LSTM**: Black-box risk per Polamuri et al.; mitigated partially via SHAP on tree models.",
+        "- **RNN**: Vanishing gradients limit effective memory to ~10 steps despite longer lookback windows.",
+        "- **All models**: No news, earnings surprises, or macro shock dummies — structural breaks remain unexplained.",
+    ]
 
     lines.append("\n## Best model per ticker (lowest test RMSE/mean)\n")
     best = df.loc[df.groupby("ticker")["rmse_mean_test"].idxmin()]
@@ -87,28 +72,7 @@ def generate_report(*, results_dir: str | Path = RESULTS_DIR, out_path: str | Pa
     for t in sorted(df["ticker"].unique()):
         sub = df[df["ticker"] == t].sort_values("rmse_mean_test")
         lines.append(f"### {t}\n")
-        cols = [
-            "model",
-            "rmse_mean_train",
-            "rmse_mean_test",
-            "bootstrap_rmse_low",
-            "bootstrap_rmse_high",
-            "mae",
-            "rmse_dollar",
-            "r2",
-            "dir_acc",
-            "ic",
-            "icir",
-            "cls_acc",
-            "cls_f1",
-            "cls_auc",
-            "ann_return",
-            "sharpe",
-            "max_dd",
-            "calmar",
-            "sharpe_vs_bench",
-        ]
-        cols = [c for c in cols if c in sub.columns]
+        cols = [c for c in REPORT_COLUMNS if c in sub.columns]
         lines.append(sub[cols].to_markdown(index=False))
         lines.append("\n")
 

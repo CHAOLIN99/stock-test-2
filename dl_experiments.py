@@ -21,11 +21,18 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
-warnings.filterwarnings("ignore")
-
 from config import LOOKBACK, RESULTS_DIR, TICKERS
+from data_pipeline import (
+    build_supervised_frame,
+    clean_ohlcv,
+    download_yahoo,
+    load_fred_features,
+    train_test_split_df,
+)
 from evaluate import rmse_over_mean
 from models import deep_learning as dl
+
+warnings.filterwarnings("ignore")
 
 MACRO_COLS = {"FEDFUNDS", "T10Y2Y", "VIXCLS", "CPIAUCSL", "UNRATE", "DGS10", "CPIAUCSL_yoy"}
 RAW_COLS = {"Open", "High", "Low", "Close", "Volume"}
@@ -71,11 +78,8 @@ GRIDS: Dict[str, List[Dict[str, Any]]] = {
 
 
 def load_frame(ticker: str, macro: pd.DataFrame):
-    from data_pipeline import build_supervised_frame, download_yahoo, train_test_split_df
-    from run_experiment import _clean_ohlcv
-
     raw, _ = download_yahoo(ticker, start_date=TICKERS[ticker])
-    ohlcv = _clean_ohlcv(raw)
+    ohlcv = clean_ohlcv(raw)
     sup, cols = build_supervised_frame(ticker, ohlcv, macro)
     train, test = train_test_split_df(sup, ticker)
     train, test = train.dropna(subset=cols), test.dropna(subset=cols)
@@ -146,8 +150,6 @@ def main(argv: List[str] | None = None) -> int:
     p.add_argument("--grid", choices=list(GRIDS) + ["all"], default="baseline")
     p.add_argument("--ticker", action="append", choices=sorted(TICKERS), help="Repeatable; default: all tickers")
     args = p.parse_args(argv)
-
-    from data_pipeline import load_fred_features
 
     macro = load_fred_features(min(TICKERS.values()), "2027-01-01")
     configs = [c for g in GRIDS.values() for c in g] if args.grid == "all" else GRIDS[args.grid]

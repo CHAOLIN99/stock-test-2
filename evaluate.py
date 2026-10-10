@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.metrics import (
     accuracy_score,
@@ -216,83 +215,42 @@ def full_metrics_block(
     return m
 
 
-def _to_py(x: Any) -> Any:
-    """Cast numpy/pandas scalars to JSON-safe Python types."""
-    if x is None:
-        return None
-    if isinstance(x, (np.floating,)):
-        v = float(x)
-        return v if np.isfinite(v) else None
-    if isinstance(x, (np.integer,)):
-        return int(x)
-    if isinstance(x, float):
-        return x if np.isfinite(x) else None
-    if isinstance(x, (str, int, bool)):
-        return x
-    if isinstance(x, (pd.Timestamp,)):
-        return str(x.date())
-    return x
-
-
-def _atomic_write_json(path: Path, payload: Any) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-    os.replace(tmp, path)
-
-
 def strategy_log_returns_from_prices(pred_prices: np.ndarray, actual_next: np.ndarray) -> np.ndarray:
-    """
-    Daily strategy *log* returns derived from the existing price-based signal:
-    long when pred[t] > actual[t-1]. Uses the same transaction cost model as evaluate.py,
-    then converts net simple returns to log returns via log1p.
-    """
-    pred_prices = np.asarray(pred_prices, dtype=float).ravel()
-    actual_next = np.asarray(actual_next, dtype=float).ravel()
+    """Log version of strategy_returns_from_prices (NaN where the simple return is <= -100%)."""
     simple = strategy_returns_from_prices(pred_prices, actual_next)
-    out = np.full_like(simple, np.nan, dtype=float)
-    for i, r in enumerate(simple):
-        if not np.isfinite(r) or r <= -0.999999:
-            out[i] = np.nan
-        else:
-            out[i] = float(np.log1p(r))
-    return out
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(simple > -1.0, np.log1p(simple), np.nan)
 
 
 def feature_importance_from_model(model: Any, feature_cols: list[str], top_k: int = 20) -> list[dict[str, Any]]:
-    """
-    Best-effort feature importance:
-    - sklearn trees: feature_importances_
-    - linear models: coef_
-    Returned as [{"feature": str, "importance": float}, ...]
-    """
-    if model is None or not feature_cols:
-        return []
-    imp = None
+    """Top-k features by tree `feature_importances_` or |linear `coef_`|."""
     if hasattr(model, "feature_importances_"):
-        try:
-            imp = np.asarray(getattr(model, "feature_importances_"), dtype=float).ravel()
-        except Exception:
-            imp = None
+        imp = np.asarray(model.feature_importances_, dtype=float).ravel()
     elif hasattr(model, "coef_"):
-        try:
-            coef = np.asarray(getattr(model, "coef_"), dtype=float)
-            imp = np.abs(coef).ravel()
-        except Exception:
-            imp = None
-    if imp is None or len(imp) != len(feature_cols):
+        imp = np.abs(np.asarray(model.coef_, dtype=float)).ravel()
+    else:
         return []
-    imp = np.where(np.isfinite(imp), imp, 0.0)
-    order = np.argsort(-imp)[:top_k]
-    out = []
-    for i in order:
-        v = float(imp[int(i)])
-        if v <= 0:
-            continue
-        out.append({"feature": str(feature_cols[int(i)]), "importance": float(v)})
-    return out
+    if len(imp) != len(feature_cols):
+        return []
+    imp = np.nan_to_num(imp)
+    return [
+        {"feature": feature_cols[i], "importance": float(imp[i])}
+        for i in np.argsort(-imp)[:top_k]
+        if imp[i] > 0
+    ]
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively convert numpy scalars to Python and non-finite floats to None."""
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        return float(obj) if np.isfinite(obj) else None
+    return obj
 
 
 def write_dashboard_data(
@@ -302,42 +260,9 @@ def write_dashboard_data(
     out_dir: str | Path = "results",
     generated_at: str,
 ) -> None:
-    """
-    Write frontend dashboard payloads. This is intentionally file-system oriented
-    and uses atomic replaces to avoid partial writes on crashes.
-
-    Expected per_ticker[ticker] shape matches charts_data.json schema.
-    """
-    out_dir = Path(out_dir)
-    charts_path = out_dir / "charts_data.json"
-    payload = {
-        "tickers": tickers,
-        "generated_at": generated_at,
-        "data": {},
-    }
-    for t in tickers:
-        td = per_ticker.get(t) or {}
-        payload["data"][t] = td
-
-    # also provide split outputs for debugging/optional use
-    fi_payload = {t: (per_ticker.get(t) or {}).get("feature_importance", {}) for t in tickers}
-    reg_payload = {
-        t: {
-            "dates": (per_ticker.get(t) or {}).get("dates", []),
-            "regime": (per_ticker.get(t) or {}).get("regime", []),
-            "regime_names": (per_ticker.get(t) or {}).get("regime_names", []),
-        }
-        for t in tickers
-    }
-
-    # Ensure JSON-safe types
-    def normalize(obj: Any) -> Any:
-        if isinstance(obj, dict):
-            return {str(k): normalize(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [normalize(v) for v in obj]
-        return _to_py(obj)
-
-    _atomic_write_json(charts_path, normalize(payload))
-    _atomic_write_json(out_dir / "feature_importance.json", normalize(fi_payload))
-    _atomic_write_json(out_dir / "regime_labels.json", normalize(reg_payload))
+    """Write results/charts_data.json (atomic replace, so the dashboard never reads a partial file)."""
+    payload = {"tickers": tickers, "generated_at": generated_at, "data": {t: per_ticker[t] for t in tickers}}
+    path = Path(out_dir) / "charts_data.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(_json_safe(payload), indent=2), encoding="utf-8")
+    os.replace(tmp, path)

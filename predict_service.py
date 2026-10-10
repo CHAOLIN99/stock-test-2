@@ -20,7 +20,7 @@ import pandas as pd
 import yfinance as yf
 
 from config import RESULTS_DIR, SAVED_MODELS_DIR, TICKERS, TIER3_NAMES
-from data_pipeline import add_technical_features, load_fred_features, merge_macro
+from data_pipeline import add_technical_features, clean_ohlcv, load_fred_features, merge_macro
 
 PRICE_TTL_S = 15 * 60
 MACRO_TTL_S = 6 * 60 * 60
@@ -59,10 +59,7 @@ def _download_prices(ticker: str) -> pd.DataFrame:
         df.index = df.index.tz_localize(None)
     df = df.rename(columns=str.title)[["Open", "High", "Low", "Close", "Volume"]]
     df.index.name = "Date"
-    df = df.sort_index()
-    df = df[~df.index.duplicated(keep="last")]
-    df = df.apply(pd.to_numeric, errors="coerce").ffill(limit=2)
-    return df.dropna(subset=["Close"])
+    return clean_ohlcv(df).dropna(subset=["Close"])
 
 
 def _macro() -> pd.DataFrame:

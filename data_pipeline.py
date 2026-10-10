@@ -1,17 +1,16 @@
 """
 Data download, validation, feature engineering, and train/test splits.
-Primary: Yahoo Finance (cached parquet). Secondary: FRED via pandas_datareader.
+Prices: Yahoo Finance (cached parquet, Stooq fallback). Macro: FRED CSV endpoints.
 """
 
 from __future__ import annotations
 
-import warnings
-from pathlib import Path
-from typing import Optional, Tuple
-
 import io
 import urllib.error
 import urllib.request
+import warnings
+from pathlib import Path
+from typing import Optional, Tuple
 
 import joblib
 import numpy as np
@@ -25,7 +24,6 @@ from config import (
     RANDOM_SEED,
     SAVED_MODELS_DIR,
     TEST_START,
-    TICKERS,
     TRAIN_END,
     YF_END,
 )
@@ -73,24 +71,11 @@ def download_yahoo(
             sym = ticker.replace("^", "").lower() + ".us"
             url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
             with urllib.request.urlopen(url, timeout=60) as resp:
-                raw = resp.read().decode("utf-8")
-            df = pd.read_csv(io.StringIO(raw))
-            if not df.empty and "Date" in df.columns:
-                df["Date"] = pd.to_datetime(df["Date"])
-                df = df.set_index("Date").sort_index()
-                df.index = df.index.tz_localize(None)
-                df = df.rename(
-                    columns={
-                        "Open": "Open",
-                        "High": "High",
-                        "Low": "Low",
-                        "Close": "Close",
-                        "Volume": "Volume",
-                    }
-                )
-                source = "stooq_fallback"
-            else:
+                df = pd.read_csv(io.StringIO(resp.read().decode("utf-8")))
+            if df.empty or "Date" not in df.columns:
                 raise RuntimeError("Empty Stooq data")
+            df = df.set_index(pd.to_datetime(df.pop("Date"))).sort_index()
+            source = "stooq_fallback"
         except Exception as e:
             raise RuntimeError(f"yfinance and Stooq failed for {ticker}: {e}") from e
     else:
@@ -98,12 +83,8 @@ def download_yahoo(
         if getattr(df.index, "tz", None) is not None:
             df.index = df.index.tz_localize(None)
 
+    # With auto_adjust=True, Close is the adjusted close
     df = df.rename(columns=str.title)
-    # yfinance with auto_adjust: Close is adjusted
-    col_map = {"Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"}
-    for k in list(df.columns):
-        if k not in col_map:
-            df = df.drop(columns=[k], errors="ignore")
     df = df[[c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]]
     df.index.name = "Date"
     df = df.sort_index()
@@ -116,24 +97,16 @@ def validate_price_df(df: pd.DataFrame, train_end: str = TRAIN_END) -> None:
     assert df.index.is_monotonic_increasing
     assert not df.index.duplicated().any()
     train = df[df.index <= train_end]
-    assert train.index.max() <= pd.Timestamp(train_end)
-    assert (train.index <= pd.Timestamp(train_end)).all()
     vol = train["Volume"].astype(float)
     pct_pos = (vol > 0).mean()
     assert pct_pos > 0.98, f"Volume > 0 on {pct_pos:.2%} of days (need >98%)"
 
 
-def forward_fill_limited(s: pd.Series, max_gap: int = 2) -> pd.Series:
-    """Forward-fill only up to `max_gap` consecutive NaNs."""
-    s = s.copy()
-    is_na = s.isna()
-    if not is_na.any():
-        return s
-    groups = (~is_na).cumsum()
-    runlength = s.groupby(groups).transform("count")
-    # mask runs of NA longer than max_gap: leave as NA
-    # simpler: ffill with limit
-    return s.ffill(limit=max_gap)
+def clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.apply(pd.to_numeric, errors="coerce")
+    return df.ffill(limit=2)
 
 
 def load_fred_features(start: str, end: str) -> pd.DataFrame:
@@ -150,17 +123,15 @@ def load_fred_features(start: str, end: str) -> pd.DataFrame:
                 raw = resp.read().decode("utf-8", errors="replace")
             s = pd.read_csv(io.StringIO(raw), index_col=0, parse_dates=True)
             s = s.rename(columns={s.columns[0]: sid})
-            parts.append(s)
+            s[sid] = pd.to_numeric(s[sid], errors="coerce")
         except (urllib.error.URLError, ValueError, pd.errors.ParserError):
-            parts.append(pd.DataFrame(index=idx, columns=[sid]))
+            s = pd.DataFrame(index=idx, columns=[sid], dtype=float)
+        parts.append(s)
 
-    fred = pd.concat(parts, axis=1)
-    fred = fred.sort_index()
-    fred = fred.reindex(idx).ffill()
-    if "CPIAUCSL" in fred.columns:
-        cpi = fred["CPIAUCSL"]
-        fred["CPIAUCSL_yoy"] = cpi.pct_change(periods=12) * 100.0
-    return fred.ffill()
+    fred = pd.concat(parts, axis=1).sort_index()
+    # CPI is monthly: 12 observations = one year (must be computed before daily reindexing)
+    fred["CPIAUCSL_yoy"] = fred["CPIAUCSL"].dropna().pct_change(periods=12) * 100.0
+    return fred.reindex(idx).ffill()
 
 
 def add_technical_features(ohlcv: pd.DataFrame) -> pd.DataFrame:

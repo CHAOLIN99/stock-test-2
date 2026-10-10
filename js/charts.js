@@ -50,55 +50,20 @@ const REGIME_COLORS = Object.freeze({
   sideways: "#888780",
 });
 
-const FEATURE_LABELS = Object.freeze({
-  SMA_5: "SMA (5)",
-  SMA_10: "SMA (10)",
-  SMA_20: "SMA (20)",
-  SMA_50: "SMA (50)",
-  SMA_200: "SMA (200)",
-  RSI_14: "RSI (14)",
-  MACD: "MACD",
-  VOL_20: "Volatility (20d)",
-});
-
 const chartInstances = new Map();
 const chartCleanups = new Map();
 
 const destroyChart = (key) => {
-  const existing = chartInstances.get(key);
-  if (existing) {
-    try { existing.destroy(); } catch { /* noop */ }
-    chartInstances.delete(key);
-  }
-  const cleanup = chartCleanups.get(key);
-  if (cleanup) {
-    try { cleanup(); } catch { /* noop */ }
-    chartCleanups.delete(key);
-  }
-};
-
-const destroyAllCharts = () => {
-  for (const key of Array.from(chartInstances.keys())) destroyChart(key);
-  for (const key of Array.from(chartCleanups.keys())) {
-    const fn = chartCleanups.get(key);
-    try { fn?.(); } catch { /* noop */ }
-    chartCleanups.delete(key);
-  }
+  chartInstances.get(key)?.destroy();
+  chartInstances.delete(key);
+  chartCleanups.get(key)?.();
+  chartCleanups.delete(key);
 };
 
 const destroyChartsMatching = (predicate) => {
-  const seen = new Set();
-  for (const key of Array.from(chartInstances.keys())) {
-    if (predicate(key)) { destroyChart(key); seen.add(key); }
-  }
-  // Some render targets (e.g. SVG regime timeline) register a cleanup without a Chart instance.
-  for (const key of Array.from(chartCleanups.keys())) {
-    if (!seen.has(key) && predicate(key)) {
-      const fn = chartCleanups.get(key);
-      try { fn?.(); } catch { /* noop */ }
-      chartCleanups.delete(key);
-    }
-  }
+  // Include cleanup-only keys (e.g. the SVG regime timeline has no Chart instance).
+  const keys = new Set([...chartInstances.keys(), ...chartCleanups.keys()]);
+  for (const key of keys) if (predicate(key)) destroyChart(key);
 };
 
 const _cssVarCache = new Map();
@@ -160,34 +125,25 @@ const baseChartOptions = (nPoints) => {
   };
 };
 
-const attachZoomReset = ({ chart, button, key }) => {
+/** Wire a "reset zoom" button. Must run on plain options before the chart is created:
+ *  assigning into a live chart.options proxy recurses inside Chart.js. */
+const addZoomReset = (opts, button, key) => {
+  chartCleanups.get(key)?.();
+  chartCleanups.delete(key);
   if (!button) return;
-  // Detach any previous listener bound to this key to avoid leaks on chart reuse.
-  const prev = chartCleanups.get(key);
-  if (prev) {
-    try { prev(); } catch { /* noop */ }
-    chartCleanups.delete(key);
-  }
 
-  const updateBtn = () => {
-    const zs = chart.getZoomLevel?.() ?? 1;
-    const active = !!(zs && zs > 1.001);
-    if (button.hidden === active) button.hidden = !active;
+  const updateBtn = ({ chart }) => {
+    button.hidden = !(chart.getZoomLevel() > 1.001);
   };
+  opts.plugins.zoom.zoom.onZoomComplete = updateBtn;
+  opts.plugins.zoom.pan.onPanComplete = updateBtn;
+
   const onClick = () => {
-    chart.resetZoom?.("none");
+    chartInstances.get(key)?.resetZoom("none");
     button.hidden = true;
   };
   button.addEventListener("click", onClick);
   button.hidden = true;
-
-  // Use Chart.js zoom plugin events instead of polling.
-  const zoomOpts = chart.options.plugins?.zoom ?? {};
-  zoomOpts.zoom = zoomOpts.zoom || {};
-  zoomOpts.pan = zoomOpts.pan || {};
-  zoomOpts.zoom.onZoomComplete = updateBtn;
-  zoomOpts.pan.onPanComplete = updateBtn;
-
   chartCleanups.set(key, () => button.removeEventListener("click", onClick));
 };
 
@@ -307,9 +263,8 @@ const renderPriceChart = ({ key = "price", canvas, tickerData, modelSet, regimeO
     opts.plugins.annotation = { annotations: {} };
   }
 
-  const chart = upsertChart(key, canvas, { type: "line", data: { labels, datasets }, options: opts });
-  attachZoomReset({ chart, button: resetButton, key });
-  return chart;
+  addZoomReset(opts, resetButton, key);
+  return upsertChart(key, canvas, { type: "line", data: { labels, datasets }, options: opts });
 };
 
 const renderRmseChart = ({ canvas, rows, resetButton } = {}) => {
@@ -322,8 +277,9 @@ const renderRmseChart = ({ canvas, rows, resetButton } = {}) => {
   const opts = baseChartOptions(labels.length);
   opts.scales.y.title = { display: true, text: "RMSE/mean (test)", color: getCssVar("--color-text-muted") };
   opts.plugins.legend.display = false;
+  addZoomReset(opts, resetButton, "rmse");
 
-  const chart = upsertChart("rmse", canvas, {
+  return upsertChart("rmse", canvas, {
     type: "bar",
     data: {
       labels,
@@ -331,8 +287,6 @@ const renderRmseChart = ({ canvas, rows, resetButton } = {}) => {
     },
     options: opts,
   });
-  attachZoomReset({ chart, button: resetButton, key: "rmse" });
-  return chart;
 };
 
 const renderEquityChart = ({ canvas, tickerData, modelSet } = {}) => {
@@ -388,7 +342,7 @@ const renderFeatureImportance = ({ canvas, tickerData, modelPreference } = {}) =
   const chosen = modelPreference?.find((m) => Array.isArray(fi[m]) && fi[m].length) ?? null;
   const arr = chosen ? fi[chosen] : [];
   const top = (arr || []).slice(0, 20);
-  const labels = top.map((x) => FEATURE_LABELS[x.feature] ?? x.feature);
+  const labels = top.map((x) => x.feature);
   const data = top.map((x) => x.importance);
 
   const opts = baseChartOptions(labels.length);

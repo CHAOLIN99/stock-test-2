@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 import warnings
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
-import pandas as pd
-import sys
-
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.neural_network import MLPRegressor
@@ -50,9 +48,8 @@ def _ts_cv_predict(
     oof = np.zeros(len(y))
     for train_idx, val_idx in tscv.split(X):
         tr_x, tr_y = X[train_idx], y[train_idx]
-        if max_train_rows is not None and len(tr_x) > max_train_rows:
-            tr_x = tr_x[-max_train_rows:]
-            tr_y = tr_y[-max_train_rows:]
+        if max_train_rows:
+            tr_x, tr_y = tr_x[-max_train_rows:], tr_y[-max_train_rows:]
         m = model_factory()
         m.fit(tr_x, tr_y)
         oof[val_idx] = m.predict(X[val_idx])
@@ -95,7 +92,7 @@ def train_sklearn_with_oof(
                 max_iter=500,
             )
         if name == "XGBoost":
-            if USE_HGB_AS_XGB or XGBRegressor is None:
+            if USE_HGB_AS_XGB:
                 return HistGradientBoostingRegressor(
                     max_iter=500,
                     max_depth=4,
@@ -121,18 +118,13 @@ def train_sklearn_with_oof(
             )
         raise ValueError(name)
 
+    # SVR is O(n^2): fit only on the most recent rows
     cap = svr_max_rows if name == "SVR" else None
     oof = _ts_cv_predict(X_train, y_train, factory, n_splits=n_splits, max_train_rows=cap)
 
-    Xt, yt = X_train, y_train
-    if name == "SVR" and len(yt) > svr_max_rows:
-        Xt = X_train[-svr_max_rows:]
-        yt = y_train[-svr_max_rows:]
-
     model = factory()
-    model.fit(Xt, yt)
-    pred_test = model.predict(X_test)
-    return model, pred_test, oof
+    model.fit(X_train[-cap:] if cap else X_train, y_train[-cap:] if cap else y_train)
+    return model, model.predict(X_test), oof
 
 
 def fit_all_tier3(
@@ -143,15 +135,7 @@ def fit_all_tier3(
     svr_max_rows: int,
     rf_estimators: int,
 ) -> Dict[str, Tuple[Any, np.ndarray, np.ndarray]]:
-    out: Dict[str, Tuple[Any, np.ndarray, np.ndarray]] = {}
-    for name in TIER3_NAMES:
-        out[name] = train_sklearn_with_oof(
-            name,
-            X_train,
-            y_train,
-            X_test,
-            n_splits,
-            svr_max_rows,
-            rf_estimators,
-        )
-    return out
+    return {
+        name: train_sklearn_with_oof(name, X_train, y_train, X_test, n_splits, svr_max_rows, rf_estimators)
+        for name in TIER3_NAMES
+    }

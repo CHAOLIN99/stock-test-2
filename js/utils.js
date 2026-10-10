@@ -1,7 +1,5 @@
 /* Pure utilities (no side effects). */
 
-const safeVal = (v, fb = "—") => (v != null && Number.isFinite(v)) ? v : fb;
-
 const assert = (cond, message) => {
   if (!cond) throw new Error(message || "Assertion failed");
 };
@@ -32,8 +30,6 @@ const rafThrottle = (fn) => {
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-const formatMoney = (v) => (v != null && Number.isFinite(v)) ? `$${Number(v).toFixed(2)}` : "—";
-
 const formatPct = (v, digits = 1) => {
   if (v == null || !Number.isFinite(v)) return "—";
   const s = (v * 100).toFixed(digits);
@@ -63,8 +59,6 @@ const parseRoute = (hash) => {
   }
   return { name: "overview", params: {} };
 };
-
-const uniq = (arr) => Array.from(new Set(arr));
 
 const hueForAcc = (acc) => {
   if (acc == null || !Number.isFinite(acc)) return null;
