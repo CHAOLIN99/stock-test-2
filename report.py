@@ -50,10 +50,12 @@ def generate_report(*, results_dir: str | Path = RESULTS_DIR, out_path: str | Pa
         "- **Primary metric**: RMSE / mean(|Adj Close|) on the test window; bootstrap 95% CIs (n=200).",
         "- **Naive baseline**: tomorrow's close = today's close (persistence).",
         "- **Deep learning**: RNN / LSTM / BiLSTM predict the next-day log return from a 7-day window of the "
-        "same 39 scaled features as Tier 3, one step ahead from observed data; early stopping on a chronological "
+        "same 35 scaled features as Tier 3, one step ahead from observed data; early stopping on a chronological "
         "validation set (last 15% of training) with best-weight restore.",
-        "- **Secondary**: 5-day direction is the sign of the sum of five consecutive one-day log-return "
-        "forecasts from the Tier-3 models.",
+        "- **Secondary**: 5-day direction (`cls_*`) is scored against the sign of each model's next-day "
+        "forecast, using only information available on the forecast day.",
+        "- **Macro features**: monthly FRED series (CPI, unemployment, fed funds) are lagged 45 days to "
+        "their approximate publication date; daily series are used as of each trading day.",
         "- **Implementation note**: on Python 3.14+ the XGBoost wheel can segfault, so `XGBoost` is backed by "
         "`sklearn.ensemble.HistGradientBoostingRegressor` with comparable depth/iterations.",
         "\n## Limitations\n",

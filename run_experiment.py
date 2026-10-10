@@ -40,6 +40,7 @@ from config import (
     TICKERS,
     TIER3_NAMES,
     TRAIN_END,
+    YF_END,
 )
 from data_pipeline import (
     build_supervised_frame,
@@ -76,12 +77,6 @@ def prices_from_log_pred(close_at_t: np.ndarray, pred_log_ret: np.ndarray) -> np
     return close_at_t * np.exp(pred_log_ret)
 
 
-def five_day_direction(model: Any, X_test_s: np.ndarray) -> np.ndarray:
-    """Sign of the sum of five consecutive one-day log-return predictions (5-day direction)."""
-    r = model.predict(X_test_s)
-    return np.sign(np.convolve(r, np.ones(5), "valid"))[: len(r) - 5]
-
-
 def compute_metrics_row(
     ticker: str,
     model: str,
@@ -90,19 +85,11 @@ def compute_metrics_row(
     pred_next: np.ndarray,
     close_at_t: np.ndarray,
     y_class: np.ndarray,
-    cls_pred: Optional[np.ndarray],
     bench_rets: np.ndarray,
     train_rmse_mean: float,
 ) -> Dict[str, Any]:
-    m = len(actual_next)
     ret_true = np.log(actual_next / close_at_t)
     ret_pred = np.log(pred_next / close_at_t)
-
-    if cls_pred is None:
-        cls_pred = np.sign(ret_pred)
-    else:
-        cls_pred = np.pad(cls_pred, (0, m - len(cls_pred)), constant_values=np.nan)
-        cls_pred = np.where(np.isfinite(cls_pred), cls_pred, np.sign(ret_pred))
 
     mets = full_metrics_block(
         actual_next,
@@ -110,7 +97,7 @@ def compute_metrics_row(
         y_ret_true=ret_true,
         y_ret_pred=ret_pred,
         y_class_true=y_class,
-        y_class_pred=cls_pred,
+        y_class_pred=np.sign(ret_pred),
         bench_rets=bench_rets,
     )
     b_mean, b_low, b_high = bootstrap_metric(actual_next, pred_next, rmse_over_mean, n_boot=BOOTSTRAP_N)
@@ -169,7 +156,7 @@ def run_ticker(
     idx_test = test_df.index
     close_at_t = close.reindex(idx_test).values.astype(float)
     actual_next = close.shift(-1).reindex(idx_test).values.astype(float)
-    bench_rets = log_returns_from_prices(bench_close.reindex(idx_test)).values
+    bench_rets = log_returns_from_prices(bench_close).shift(-1).reindex(idx_test).values
 
     # --- Baselines ---
     def _align(s: pd.Series) -> np.ndarray:
@@ -258,11 +245,11 @@ def run_ticker(
 
     rows: List[Dict[str, Any]] = []
 
-    def score(name: str, pred_price: np.ndarray, train_rmse_mean: float = float("nan"), cls_pred=None) -> None:
+    def score(name: str, pred_price: np.ndarray, train_rmse_mean: float = float("nan")) -> None:
         rows.append(
             compute_metrics_row(
                 ticker, name, source, actual_next, pred_price, close_at_t,
-                y_class_test, cls_pred, bench_rets, train_rmse_mean,
+                y_class_test, bench_rets, train_rmse_mean,
             )
         )
 
@@ -275,14 +262,7 @@ def run_ticker(
         ("HMM_Regime", pred_hmm),
     ]:
         score(name, pv)
-    for name in TIER3_NAMES:
-        score(
-            name,
-            prices_from_log_pred(close_at_t, pred_ml[name]),
-            train_rmse(train_pred_ml[name]),
-            five_day_direction(models_save[name], X_test_s),
-        )
-    for name in ("VotingEnsemble", "StackingEnsemble"):
+    for name in (*TIER3_NAMES, "VotingEnsemble", "StackingEnsemble"):
         score(name, prices_from_log_pred(close_at_t, pred_ml[name]), train_rmse(train_pred_ml[name]))
     for name in pred_dl_test:
         score(name, prices_from_log_pred(close_at_t, pred_dl_test[name]), train_rmse(pred_dl_train[name]))
@@ -407,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     CHARTS_DIR.mkdir(parents=True, exist_ok=True)
 
     start_all = min(TICKERS.values())
-    macro = load_fred_features(start_all, "2027-01-01")
+    macro = load_fred_features(start_all, YF_END)
     bench_raw, _ = download_yahoo("^GSPC", start_date=start_all)
     bench_close = clean_ohlcv(bench_raw)["Close"]
 
@@ -427,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
             tickers=tickers,
             per_ticker=dash_all,
             out_dir=RESULTS_DIR,
-            generated_at=pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            generated_at=pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
         print("wrote:", RESULTS_DIR / "charts_data.json")
     print(out.groupby("ticker")["rmse_mean_test"].min())

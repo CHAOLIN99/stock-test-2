@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
-from config import LOOKBACK, RESULTS_DIR, TICKERS
+from config import LOOKBACK, RESULTS_DIR, TICKERS, YF_END
 from data_pipeline import (
     build_supervised_frame,
     clean_ohlcv,
@@ -34,8 +34,7 @@ from models import deep_learning as dl
 
 warnings.filterwarnings("ignore")
 
-MACRO_COLS = {"FEDFUNDS", "T10Y2Y", "VIXCLS", "CPIAUCSL", "UNRATE", "DGS10", "CPIAUCSL_yoy"}
-RAW_COLS = {"Open", "High", "Low", "Close", "Volume"}
+MACRO_COLS = {"FEDFUNDS", "T10Y2Y", "VIXCLS", "UNRATE", "DGS10", "CPIAUCSL_yoy"}
 
 FEATURE_SETS = {
     "returns": lambda cols: [c for c in cols if c.startswith("ret_")],
@@ -151,7 +150,7 @@ def main(argv: List[str] | None = None) -> int:
     p.add_argument("--ticker", action="append", choices=sorted(TICKERS), help="Repeatable; default: all tickers")
     args = p.parse_args(argv)
 
-    macro = load_fred_features(min(TICKERS.values()), "2027-01-01")
+    macro = load_fred_features(min(TICKERS.values()), YF_END)
     configs = [c for g in GRIDS.values() for c in g] if args.grid == "all" else GRIDS[args.grid]
     device = dl.get_device()
     out_path = RESULTS_DIR / "dl_experiments.csv"

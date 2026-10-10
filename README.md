@@ -1,6 +1,6 @@
 # Stock Prediction Dashboard
 
-End-to-end, reproducible next-day price prediction for **META, NVDA, AMD, MSFT, QCOM** (and an `^GSPC` benchmark), with an offline browser dashboard. Training runs on the BYU supercomputer (Slurm, see [section 2b](#2b-training-on-the-supercomputer)); the dashboard, prediction server, and Chrome extension run locally. No paid services, no build step.
+End-to-end, reproducible next-day price prediction for **META, NVDA, AMD, MSFT, QCOM** (and an `^GSPC` benchmark), with an offline browser dashboard. Training runs on the BYU supercomputer (Slurm, see [section 2b](#2b-training-on-the-supercomputer)); the dashboard and prediction server run locally. No paid services, no build step.
 
 ---
 
@@ -13,7 +13,7 @@ pip install -r requirements.txt
 python server.py --open
 ```
 
-This serves the trained results at <http://127.0.0.1:8080/dashboard.html> and the live prediction API used by the Chrome extension. Training itself runs on the cluster ([section 2b](#2b-training-on-the-supercomputer)).
+This serves the trained results at <http://127.0.0.1:8080/dashboard.html> and a live prediction API ([section 3b](#3b-prediction-api)). Training itself runs on the cluster ([section 2b](#2b-training-on-the-supercomputer)).
 
 ---
 
@@ -41,7 +41,7 @@ This serves the trained results at <http://127.0.0.1:8080/dashboard.html> and th
 | `python dl_experiments.py --grid cells` | RNN vs. GRU vs. LSTM |
 | `python dl_experiments.py --grid size` | Layer count and width |
 | `python dl_experiments.py --grid lookback` | Window length (5, 7, 21, 63 days) |
-| `python dl_experiments.py --grid features` | Returns only vs. technical vs. all 39 features |
+| `python dl_experiments.py --grid features` | Returns only vs. technical vs. all 35 features |
 | `python dl_experiments.py --grid regularization` | Dropout, weight decay, learning rate |
 | `python dl_experiments.py --grid all` | Everything above |
 
@@ -64,7 +64,7 @@ sbatch scripts/sbatch_dl_experiments.sh     # DL sweep; pass a grid name, e.g. .
 squeue -u $USER                             # job status; logs in slurm_logs/
 ```
 
-When the job finishes, commit and push `results/`, `saved_models/`, and `report.md` from the cluster, then `git pull` locally and run `python server.py --open` to view the dashboard or use the Chrome extension.
+When the job finishes, commit and push `results/`, `saved_models/`, and `report.md` from the cluster, then `git pull` locally and run `python server.py --open` to view the dashboard.
 
 Deep-learning models run on CUDA when available (then MPS, then CPU). On Python 3.12 the real XGBoost is used; the `HistGradientBoostingRegressor` stand-in only applies on Python 3.14+.
 
@@ -105,23 +105,11 @@ Append a `data` query param: `dashboard.html?data=/path/to/other_charts_data.jso
 
 ---
 
-## 3b. Chrome extension (Investopedia simulator helper)
+## 3b. Prediction API
 
-`chrome-extension/` is a Manifest V3 extension that shows live next-day forecasts in your browser. It talks to the same local server, which now also exposes a JSON API.
+`python server.py` also exposes a JSON API for live next-day forecasts.
 
-**Setup (one time):**
-
-1. Start the server: `source .venv/bin/activate && python server.py`
-2. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select the `chrome-extension/` folder.
-3. Pin **Stock Predictor** from the puzzle-piece menu.
-
-**Using it:**
-
-- Click the toolbar icon to see a forecast for any covered ticker.
-- On any `https://www.investopedia.com/simulator/*` page, a panel appears in the bottom-right corner. If the page shows a covered ticker (in the URL, a symbol input, or a heading), the panel switches to it automatically. Click the panel header to collapse it.
-- If you run the server on another port, change the URL under **Server settings** in the popup.
-
-**What the forecast means:** the server downloads fresh daily prices and FRED macro data, rebuilds the 39 training features, and runs the saved Tier-3 models plus the stacking ensemble on the latest trading day. The headline number is the stacking ensemble. **BUY/SELL** appears only when it expects a move over 0.25% *and* at least 5 of 8 models agree (at most 3 of 8 for SELL); otherwise **HOLD**. Backtest hit-rate and regime come from the last `run_experiment.py` run. Only the five trained tickers are covered; others return "not covered". This is educational output, not financial advice.
+**What the forecast means:** the server downloads fresh daily prices and FRED macro data, rebuilds the 35 training features, and runs the saved Tier-3 models plus the stacking ensemble on the latest trading day. The headline number is the stacking ensemble. **BUY/SELL** appears only when it expects a move over 0.25% *and* at least 5 of 8 models agree (at most 3 of 8 for SELL); otherwise **HOLD**. Backtest hit-rate and regime come from the last `run_experiment.py` run. Only the five trained tickers are covered; others return "not covered". This is educational output, not financial advice.
 
 **API:**
 
@@ -154,7 +142,7 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 - **Baselines (Tier 0):** Naive (tomorrow = today's close), Buy & Hold, SMA 50/200 cross
 - **Classical (Tier 1–2):** Holt–Winters, ARIMA on log returns
 - **Multivariate ML (Tier 3):** Ridge, MARS (if `pyearth` available), RandomForest, SVR (row-capped), MLP, XGBoost-like, LightGBM
-- **Deep learning (Tier 4):** RNN, LSTM-A, LSTM-B, BiLSTM (PyTorch, MPS if available). Each predicts the next-day log return from a 7-day window of the same 39 scaled features as Tier 3, one step ahead from observed data. Early stopping uses the last 15% of the training period as a chronological validation set and restores the best weights.
+- **Deep learning (Tier 4):** RNN, LSTM-A, LSTM-B, BiLSTM (PyTorch, MPS if available). Each predicts the next-day log return from a 7-day window of the same 35 scaled features as Tier 3, one step ahead from observed data. Early stopping uses the last 15% of the training period as a chronological validation set and restores the best weights.
 - **HMM:** `GaussianHMM` regime labels + regime-conditional next-day forecast
 - **Ensembles (Tier 5):** weighted voting (top-3 by OOF RMSE), stacking (Ridge meta-learner)
 
@@ -193,7 +181,6 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 ├── report.py              # renders report.md from results/results_all.csv
 ├── server.py              # local server: dashboard files + /api/* prediction routes
 ├── predict_service.py     # live next-day forecasts from saved models
-├── chrome-extension/      # MV3 extension: popup + Investopedia simulator panel
 ├── models/
 │   ├── classical.py       # Ridge, MARS, RF, SVR, MLP, XGBoost, LightGBM
 │   ├── deep_learning.py   # RNN / LSTM variants (PyTorch)

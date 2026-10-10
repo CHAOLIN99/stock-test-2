@@ -111,6 +111,9 @@ def clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 
 
 FRED_CACHE = DATA_DIR / "fred_raw.parquet"
+# Monthly series are dated at the start of the reference month but published 4-6 weeks later.
+FRED_MONTHLY = ["FEDFUNDS", "CPIAUCSL", "UNRATE", "CPIAUCSL_yoy"]
+FRED_MONTHLY_RELEASE_LAG = pd.Timedelta(days=45)
 
 
 def download_fred() -> pd.DataFrame:
@@ -133,33 +136,48 @@ def load_fred_features(start: str, end: str, use_cache: bool = True) -> pd.DataF
     idx = pd.date_range(start=start, end=end, freq="D")
     # CPI is monthly: 12 observations = one year (must be computed before daily reindexing)
     fred["CPIAUCSL_yoy"] = fred["CPIAUCSL"].dropna().pct_change(periods=12) * 100.0
+    cols = list(fred.columns)
+    released = fred[FRED_MONTHLY].dropna(how="all").shift(freq=FRED_MONTHLY_RELEASE_LAG)
+    fred = fred.drop(columns=FRED_MONTHLY).join(released, how="outer")[cols]
     return fred.reindex(idx).ffill()
+
+
+# Kept in the frame for targets/prices but excluded from model inputs: price and CPI levels trend
+# upward, so test-period values fall outside the training range.
+NON_FEATURE_COLS = {"Open", "High", "Low", "Close", "Volume", "CPIAUCSL", "y_reg", "y_class"}
+
+
+def feature_columns(frame: pd.DataFrame) -> list[str]:
+    return [col for col in frame.columns if col not in NON_FEATURE_COLS]
 
 
 def add_technical_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     """
-    Multivariate features. Rolling statistics are shifted by 1 so row t uses
-    only information available through t-1 (no same-bar leakage).
+    Multivariate features, all scale-free (returns, ratios, or % of price).
+    Day-t bar features (ret_0d, oc_ret, hl_range, vol_chg) are known at the close of t,
+    when the t+1 forecast is made. Rolling statistics are shifted by 1 so they use data through t-1.
     """
     df = ohlcv.copy()
     c = df["Close"].astype(float)
-    h, low, v = df["High"].astype(float), df["Low"].astype(float), df["Volume"].astype(float)
+    o, h, low, v = (df[k].astype(float) for k in ("Open", "High", "Low", "Volume"))
 
     log_c = np.log(c.replace(0, np.nan))
+    df["ret_0d"] = log_c.diff()
+    df["oc_ret"] = np.log(c / o.replace(0, np.nan))
+    df["hl_range"] = np.log(h / low.replace(0, np.nan))
+    df["vol_chg"] = np.log(v.replace(0, np.nan)).diff()
+
     df["ret_1d"] = log_c.diff().shift(1)
     df["ret_5d"] = log_c.diff(5).shift(1)
     df["ret_21d"] = log_c.diff(21).shift(1)
 
     for w in (10, 20, 50, 200):
-        df[f"SMA_{w}"] = c.rolling(w).mean().shift(1)
+        sma = c.rolling(w).mean().shift(1)
+        df[f"close_over_SMA_{w}"] = c.shift(1) / sma.replace(0, np.nan)
 
-    df["EMA_12"] = c.ewm(span=12, adjust=False).mean().shift(1)
-    df["EMA_26"] = c.ewm(span=26, adjust=False).mean().shift(1)
-
-    sma50 = c.rolling(50).mean().shift(1)
-    sma200 = c.rolling(200).mean().shift(1)
-    df["price_over_SMA50"] = (c.shift(1) / sma50.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
-    df["price_over_SMA200"] = (c.shift(1) / sma200.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    for span in (12, 26):
+        ema = c.ewm(span=span, adjust=False).mean().shift(1)
+        df[f"close_over_EMA_{span}"] = c.shift(1) / ema.replace(0, np.nan)
 
     delta = c.diff()
     gain = delta.clip(lower=0.0)
@@ -171,9 +189,9 @@ def add_technical_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     ema26 = c.ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
     signal = macd_line.ewm(span=9, adjust=False).mean()
-    df["MACD_line"] = macd_line.shift(1)
-    df["MACD_signal"] = signal.shift(1)
-    df["MACD_hist"] = (macd_line - signal).shift(1)
+    df["MACD_line_pct"] = (macd_line / c).shift(1)
+    df["MACD_signal_pct"] = (signal / c).shift(1)
+    df["MACD_hist_pct"] = ((macd_line - signal) / c).shift(1)
 
     ma20 = c.rolling(20).mean().shift(1)
     sd20 = c.rolling(20).std().shift(1)
@@ -189,14 +207,14 @@ def add_technical_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
         ],
         axis=1,
     ).max(axis=1)
-    df["ATR_14"] = tr.rolling(14).mean().shift(1)
+    df["ATR_14_pct"] = (tr.rolling(14).mean() / c).shift(1)
 
     lr = log_c.diff()
     df["realized_vol_21"] = (lr.rolling(21).std() * np.sqrt(252)).shift(1)
 
     sign_ret = np.sign(c.diff().fillna(0))
     obv = (sign_ret * v).cumsum()
-    df["OBV"] = obv.shift(1)
+    df["OBV_20d"] = (obv.diff(20) / v.rolling(20).sum().replace(0, np.nan)).shift(1)
     vol_ma20 = v.rolling(20).mean().shift(1)
     df["vol_ratio"] = (v.shift(1) / vol_ma20.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
     vm = v.shift(1)
@@ -232,12 +250,7 @@ def build_supervised_frame(
     full["y_reg"] = np.log(c.shift(-1) / c)
     full["y_class"] = np.sign(c.shift(-5) - c)
     full = full.replace([np.inf, -np.inf], np.nan).dropna(subset=["y_reg", "y_class"])
-    feature_cols = [
-        col
-        for col in full.columns
-        if col not in ("y_reg", "y_class")
-    ]
-    return full, feature_cols
+    return full, feature_columns(full)
 
 
 def train_test_split_df(

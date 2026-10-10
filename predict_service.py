@@ -20,7 +20,7 @@ import pandas as pd
 import yfinance as yf
 
 from config import RESULTS_DIR, SAVED_MODELS_DIR, TICKERS, TIER3_NAMES
-from data_pipeline import add_technical_features, clean_ohlcv, load_fred_features, merge_macro
+from data_pipeline import add_technical_features, clean_ohlcv, feature_columns, load_fred_features, merge_macro
 
 PRICE_TTL_S = 15 * 60
 MACRO_TTL_S = 6 * 60 * 60
@@ -123,7 +123,7 @@ def predict_next(ticker: str) -> Dict[str, Any]:
     scaler = models["scaler"]
 
     frame = merge_macro(add_technical_features(ohlcv), _macro())
-    feature_cols = list(frame.columns)
+    feature_cols = feature_columns(frame)
     frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=feature_cols)
     if frame.empty:
         raise RuntimeError(f"Not enough data to build features for {ticker}")
@@ -161,6 +161,6 @@ def predict_next(ticker: str) -> Dict[str, Any]:
             for n, r in {**per_model, "StackingEnsemble": stack_ret}.items()
         },
         "backtest": backtest,
-        "generated_at": pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
         "disclaimer": DISCLAIMER,
     }
