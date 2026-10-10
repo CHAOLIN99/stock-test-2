@@ -25,6 +25,7 @@ warnings.filterwarnings("ignore")
 from config import (
     BOOTSTRAP_N,
     CHARTS_DIR,
+    LOOKBACK,
     N_SPLITS_CV,
     RESULTS_DIR,
     RF_ESTIMATORS,
@@ -35,7 +36,6 @@ from config import (
     TIER3_NAMES,
     TRAIN_END,
 )
-from sklearn.preprocessing import MinMaxScaler
 from evaluate import (
     bootstrap_metric,
     feature_importance_from_model,
@@ -106,42 +106,6 @@ def prices_from_log_pred(
     pred_log_ret: np.ndarray,
 ) -> np.ndarray:
     return close_at_t * np.exp(pred_log_ret)
-
-
-def train_dl_price_preds(
-    model_name: str,
-    train_close: pd.Series,
-    full_close: pd.Series,
-    train_len: int,
-    lookback: int,
-    price_scaler,
-    device: torch.device,
-) -> Tuple[np.ndarray, np.ndarray]:
-    train_scaled = price_scaler.transform(train_close.values.reshape(-1, 1)).ravel()
-    full_scaled = price_scaler.transform(full_close.values.reshape(-1, 1)).ravel()
-    pred_test_s, model = dl_mod.train_dl_model(
-        model_name,
-        train_scaled,
-        full_scaled,
-        train_len,
-        lookback,
-        device,
-    )
-    if model is None or len(pred_test_s) == 0:
-        dl_mod.cleanup_dl(None, device)
-        return np.array([]), np.array([])
-    train_preds = []
-    with torch.no_grad():
-        model.eval()
-        for i in range(lookback, train_len):
-            seq = train_scaled[i - lookback : i].reshape(1, lookback, 1)
-            xt = torch.from_numpy(seq.astype(np.float32)).to(device)
-            ps = float(model(xt).cpu().numpy().ravel()[0])
-            train_preds.append(ps)
-    train_prices = price_scaler.inverse_transform(np.array(train_preds).reshape(-1, 1)).ravel()
-    test_prices = price_scaler.inverse_transform(pred_test_s.reshape(-1, 1)).ravel()
-    dl_mod.cleanup_dl(model, device)
-    return train_prices, test_prices
 
 
 def ml_chain_5d_class(
@@ -261,7 +225,6 @@ def run_ticker(
 
     train_close = prepare_univariate_series(ohlcv[ohlcv.index <= TRAIN_END])
     test_close = prepare_univariate_series(ohlcv[ohlcv.index >= TEST_START])
-    full_close = prepare_univariate_series(ohlcv)
 
     idx_test = test_df.index
     close_at_t = close.reindex(idx_test).values.astype(float)
@@ -274,7 +237,7 @@ def run_ticker(
     def _align(s: pd.Series) -> np.ndarray:
         return s.reindex(idx_test).ffill().bfill().values.astype(float)
 
-    pred_naive = _align(ts_mod.naive_forecast(train_close, test_close))
+    pred_naive = close_at_t.copy()
     pred_bh = _align(ts_mod.buy_hold_forecast(train_close, test_close.index))
     pred_sma = _align(ts_mod.sma_cross_forecast(train_close, test_close.index))
 
@@ -327,28 +290,27 @@ def run_ticker(
         )
     )
 
-    # --- DL ---
-    price_scaler = MinMaxScaler((0, 1))
-    price_scaler.fit(train_close.values.reshape(-1, 1))
-    train_len = len(train_close)
-    lookback = 7
-    dl_names = ["RNN", "LSTM_A", "LSTM_B", "BiLSTM"]
+    # --- DL: one-step-ahead log returns from windows of the scaled feature matrix ---
+    X_all_s = np.vstack([X_train_s, X_test_s])
+    y_all = np.concatenate([y_train, y_test])
+    n_train = len(X_train_s)
     pred_dl_test: Dict[str, np.ndarray] = {}
     pred_dl_train: Dict[str, np.ndarray] = {}
-    for dn in dl_names:
-        tr_p, te_p = train_dl_price_preds(
-            dn,
-            train_close,
-            full_close,
-            train_len,
-            lookback,
-            price_scaler,
-            device,
-        )
-        if te_p.size == 0:
+    dl_meta: Dict[str, Any] = {}
+    for dn, spec in dl_mod.PRESETS.items():
+        res = dl_mod.train_seq_model(spec, X_all_s, y_all, n_train, LOOKBACK, device)
+        if res.model is None:
             continue
-        pred_dl_train[dn] = tr_p
-        pred_dl_test[dn] = te_p
+        pred_dl_train[dn] = res.pred[:n_train]
+        pred_dl_test[dn] = res.pred[n_train:]
+        dl_meta[dn] = {
+            "n_params": res.n_params,
+            "best_epoch": res.best_epoch,
+            "epochs_run": res.epochs_run,
+            "lookback": LOOKBACK,
+            "history": res.history,
+        }
+        dl_mod.cleanup_dl(res.model, device)
 
     # Train close for next-day alignment (ML): predict price at t+1 from row t
     train_close_at_t = close.reindex(train_df.index).values.astype(float)
@@ -360,12 +322,6 @@ def run_ticker(
         if mask.sum() < 10:
             return float("nan")
         return rmse_over_mean(train_actual_next[mask], p[mask])
-
-    def train_rmse_dl(train_prices: np.ndarray) -> float:
-        actual = train_close.values[lookback:train_len]
-        m = min(len(actual), len(train_prices))
-        mask = np.isfinite(actual[:m]) & np.isfinite(train_prices[:m])
-        return rmse_over_mean(actual[:m][mask[:m]], train_prices[:m][mask[:m]])
 
     # Collect all test predictions (price next)
     ts_preds = {
@@ -433,22 +389,18 @@ def run_ticker(
         )
 
     for dn in pred_dl_test:
-        pt = pred_dl_test[dn]
-        tr = train_rmse_dl(pred_dl_train[dn])
-        # align DL test length to test_df
-        m = min(len(actual_next), len(pt))
         rows.append(
             compute_metrics_row(
                 ticker,
                 dn,
                 source,
-                actual_next[:m],
-                pt[:m],
-                close_at_t[:m],
-                y_class_test[:m],
-                np.sign(np.log(pt[:m] / close_at_t[:m])),
-                bench_rets[:m],
-                tr,
+                actual_next,
+                prices_from_log_pred(close_at_t, pred_dl_test[dn]),
+                close_at_t,
+                y_class_test,
+                None,
+                bench_rets,
+                train_rmse_ml(pred_dl_train[dn]),
             )
         )
 
@@ -459,6 +411,7 @@ def run_ticker(
         "n_train": len(train_df),
         "n_test": len(test_df),
         "voting_top3": top3,
+        "deep_learning": dl_meta,
         "adf_kpss": ts_mod.adf_kpss_summary(log_returns_from_prices(train_close).dropna()),
     }
 
@@ -520,14 +473,8 @@ def run_ticker(
     for name in ("VotingEnsemble", "StackingEnsemble"):
         preds[name] = _as_list(prices_from_log_pred(close_at_t, pred_ml[name]), n)
 
-    # DL are already price preds but can be shorter; fill with nulls
     for dn, arr in pred_dl_test.items():
-        filled = [None] * n
-        m = min(n, len(arr))
-        for i in range(m):
-            v = float(arr[i]) if np.isfinite(arr[i]) else None
-            filled[i] = v
-        preds[dn] = filled
+        preds[dn] = _as_list(prices_from_log_pred(close_at_t, arr), n)
 
     # Metrics map by model (test metrics only)
     metrics: Dict[str, Any] = {}

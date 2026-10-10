@@ -1,9 +1,18 @@
-"""PyTorch RNN/LSTM models with MPS backend."""
+"""
+PyTorch recurrent models for next-day log-return prediction (MPS backend).
+
+Each sample is a window of the last `lookback` rows of the scaled feature
+matrix; the target is that window's final-row y_reg (log(close[t+1]/close[t])).
+Predictions are one-step-ahead from observed data, so they line up row-for-row
+with the Tier-3 models.
+"""
 
 from __future__ import annotations
 
+import copy
 import gc
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -19,166 +28,150 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def _early_stop_best(losses: List[float], patience: int) -> bool:
-    if len(losses) <= patience:
-        return False
-    best = min(losses[: -patience])
-    return min(losses[-patience:]) >= best
+@dataclass(frozen=True)
+class SeqSpec:
+    cell: str = "lstm"  # "lstm" | "gru" | "rnn"
+    hidden: Sequence[int] = (128, 64)
+    dropout: float = 0.2
+    bidirectional: bool = False
+    head: Optional[int] = None  # extra dense layer before the output
 
 
-class RNNModel(nn.Module):
-    def __init__(self):
+PRESETS: Dict[str, SeqSpec] = {
+    "RNN": SeqSpec(cell="rnn", hidden=(256, 128), dropout=0.2),
+    "LSTM_A": SeqSpec(cell="lstm", hidden=(256, 128), dropout=0.2),
+    "LSTM_B": SeqSpec(cell="lstm", hidden=(256, 256), dropout=0.3, head=32),
+    "BiLSTM": SeqSpec(cell="lstm", hidden=(128, 64), dropout=0.2, bidirectional=True),
+}
+
+_CELLS = {"lstm": nn.LSTM, "gru": nn.GRU, "rnn": nn.RNN}
+
+
+class SeqRegressor(nn.Module):
+    def __init__(self, n_features: int, spec: SeqSpec):
         super().__init__()
-        self.rnn1 = nn.RNN(1, 256, batch_first=True)
-        self.drop1 = nn.Dropout(0.2)
-        self.rnn2 = nn.RNN(256, 128, batch_first=True)
-        self.drop2 = nn.Dropout(0.2)
-        self.fc = nn.Linear(128, 1)
+        dirs = 2 if spec.bidirectional else 1
+        layers, size = [], n_features
+        for h in spec.hidden:
+            layers.append(_CELLS[spec.cell](size, h, batch_first=True, bidirectional=spec.bidirectional))
+            size = h * dirs
+        self.layers = nn.ModuleList(layers)
+        self.drop = nn.Dropout(spec.dropout)
+        self.head = nn.Sequential(nn.Linear(size, spec.head), nn.ReLU()) if spec.head else nn.Identity()
+        self.out = nn.Linear(spec.head or size, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        o, _ = self.rnn1(x)
-        o = self.drop1(o)
-        o, _ = self.rnn2(o)
-        o = self.drop2(o[:, -1, :])
-        return self.fc(o).squeeze(-1)
+        for layer in self.layers:
+            x, _ = layer(x)
+            x = self.drop(x)
+        return self.out(self.head(x[:, -1, :])).squeeze(-1)
 
 
-class LSTM_A(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.l1 = nn.LSTM(1, 256, batch_first=True)
-        self.d1 = nn.Dropout(0.2)
-        self.l2 = nn.LSTM(256, 128, batch_first=True)
-        self.d2 = nn.Dropout(0.2)
-        self.fc = nn.Linear(128, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        o, _ = self.l1(x)
-        o = self.d1(o)
-        o, _ = self.l2(o)
-        o = self.d2(o[:, -1, :])
-        return self.fc(o).squeeze(-1)
+def count_params(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters())
 
 
-class LSTM_B(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.l1 = nn.LSTM(1, 256, batch_first=True)
-        self.d1 = nn.Dropout(0.3)
-        self.l2 = nn.LSTM(256, 256, batch_first=True)
-        self.d2 = nn.Dropout(0.3)
-        self.fc1 = nn.Linear(256, 32)
-        self.fc2 = nn.Linear(32, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        o, _ = self.l1(x)
-        o = self.d1(o)
-        o, _ = self.l2(o)
-        o = self.d2(o[:, -1, :])
-        o = torch.relu(self.fc1(o))
-        return self.fc2(o).squeeze(-1)
+def make_windows(X: np.ndarray, lookback: int) -> np.ndarray:
+    """(N, F) -> (N - lookback + 1, lookback, F); window k ends at row k + lookback - 1."""
+    idx = np.arange(lookback)[None, :] + np.arange(len(X) - lookback + 1)[:, None]
+    return X[idx].astype(np.float32)
 
 
-class BiLSTMModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.l1 = nn.LSTM(1, 128, batch_first=True, bidirectional=True)
-        self.d1 = nn.Dropout(0.2)
-        self.l2 = nn.LSTM(256, 64, batch_first=True, bidirectional=True)
-        self.fc = nn.Linear(128, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        o, _ = self.l1(x)
-        o = self.d1(o)
-        o, _ = self.l2(o)
-        o = o[:, -1, :]
-        return self.fc(o).squeeze(-1)
+@dataclass
+class SeqResult:
+    pred: np.ndarray  # length N; NaN for the first lookback-1 rows
+    model: Optional[nn.Module]
+    n_params: int
+    best_epoch: int
+    epochs_run: int
+    history: Dict[str, List[float]] = field(default_factory=dict)
 
 
-def make_sequences(series: np.ndarray, lookback: int) -> Tuple[np.ndarray, np.ndarray]:
-    """series: scaled close prices. Predict next step (scaled)."""
-    x, y = [], []
-    for i in range(len(series) - lookback):
-        x.append(series[i : i + lookback])
-        y.append(series[i + lookback])
-    return np.array(x, dtype=np.float32), np.array(y, dtype=np.float32)
+def _predict(model: nn.Module, W: np.ndarray, device: torch.device, batch: int = 1024) -> np.ndarray:
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(W), batch):
+            out.append(model(torch.from_numpy(W[i : i + batch]).to(device)).cpu().numpy())
+    return np.concatenate(out) if out else np.array([], dtype=np.float32)
 
 
-def train_dl_model(
-    model_name: str,
-    train_scaled: np.ndarray,
-    full_scaled: np.ndarray,
-    train_len: int,
+def train_seq_model(
+    spec: SeqSpec,
+    X_all: np.ndarray,
+    y_all: np.ndarray,
+    n_train: int,
     lookback: int,
     device: torch.device,
-) -> Tuple[np.ndarray, nn.Module]:
+    epochs: int = EPOCHS,
+    patience: int = PATIENCE,
+    lr: float = 1e-3,
+    weight_decay: float = 0.0,
+    batch_size: int = BATCH_SIZE,
+    val_frac: float = 0.15,
+) -> SeqResult:
     """
-    train_scaled: scaled train close only (1D).
-    full_scaled: scaled concatenation of train + test closes (1D), same scaler as train.
-    train_len: length of train segment in full_scaled.
-    Returns test predictions (scaled space), length = len(full_scaled) - train_len.
+    X_all: scaled features for train rows followed by test rows (chronological).
+    y_all: next-day log returns aligned with X_all; only y_all[:n_train] is used to fit.
+    The last `val_frac` of training windows (chronological) drive early stopping.
     """
     torch.manual_seed(RANDOM_SEED)
     if device.type == "mps":
         torch.mps.manual_seed(RANDOM_SEED)
 
-    X_tr, y_tr = make_sequences(train_scaled, lookback)
-    if len(X_tr) < 64:
-        return np.array([]), None
+    W = make_windows(X_all, lookback)
+    targets = y_all[lookback - 1 :]
+    n_train_w = n_train - lookback + 1
+    n_val = max(int(n_train_w * val_frac), 1)
+    n_fit = n_train_w - n_val
+    if n_fit < 64:
+        return SeqResult(np.full(len(X_all), np.nan), None, 0, 0, 0)
 
-    X_tr = X_tr.reshape(-1, lookback, 1)
-    ds = TensorDataset(
-        torch.from_numpy(X_tr),
-        torch.from_numpy(y_tr),
+    mu, sd = float(targets[:n_fit].mean()), float(targets[:n_fit].std() + 1e-12)
+    t_scaled = ((targets - mu) / sd).astype(np.float32)
+
+    loader = DataLoader(
+        TensorDataset(torch.from_numpy(W[:n_fit]), torch.from_numpy(t_scaled[:n_fit])),
+        batch_size=batch_size,
+        shuffle=True,
     )
-    loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+    W_val = torch.from_numpy(W[n_fit:n_train_w]).to(device)
+    t_val = torch.from_numpy(t_scaled[n_fit:n_train_w]).to(device)
 
-    if model_name == "RNN":
-        model = RNNModel().to(device)
-    elif model_name == "LSTM_A":
-        model = LSTM_A().to(device)
-    elif model_name == "LSTM_B":
-        model = LSTM_B().to(device)
-    elif model_name == "BiLSTM":
-        model = BiLSTMModel().to(device)
-    else:
-        raise ValueError(model_name)
-
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    model = SeqRegressor(X_all.shape[1], spec).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     loss_fn = nn.MSELoss()
-    losses: List[float] = []
+    history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
+    best_val, best_state, best_epoch = float("inf"), None, 0
 
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         model.train()
-        ep_loss = 0.0
-        n = 0
+        total, n = 0.0, 0
         for xb, yb in loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
+            xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad()
-            pred = model(xb)
-            loss = loss_fn(pred, yb)
+            loss = loss_fn(model(xb), yb)
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            ep_loss += float(loss.item()) * len(xb)
+            total += float(loss.item()) * len(xb)
             n += len(xb)
-        losses.append(ep_loss / max(n, 1))
-        if _early_stop_best(losses, PATIENCE):
+        model.eval()
+        with torch.no_grad():
+            val_loss = float(loss_fn(model(W_val), t_val).item())
+        history["train_loss"].append(total / max(n, 1))
+        history["val_loss"].append(val_loss)
+        if val_loss < best_val:
+            best_val, best_epoch = val_loss, epoch
+            best_state = copy.deepcopy(model.state_dict())
+        elif epoch - best_epoch >= patience:
             break
 
-    model.eval()
-    full = full_scaled.astype(np.float32)
-    test_len = len(full) - train_len
-    preds = []
-    window = list(full[:train_len])
-    with torch.no_grad():
-        for _ in range(test_len):
-            seq = np.array(window[-lookback:], dtype=np.float32).reshape(1, lookback, 1)
-            xt = torch.from_numpy(seq).to(device)
-            p = float(model(xt).cpu().numpy().ravel()[0])
-            preds.append(p)
-            window.append(p)
-    return np.array(preds, dtype=np.float32), model
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    pred = np.full(len(X_all), np.nan)
+    pred[lookback - 1 :] = _predict(model, W, device) * sd + mu
+    return SeqResult(pred, model, count_params(model), best_epoch + 1, len(history["val_loss"]), history)
 
 
 def cleanup_dl(model: Optional[nn.Module], device: torch.device) -> None:

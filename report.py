@@ -49,6 +49,14 @@ def generate_report(*, results_dir: str | Path = RESULTS_DIR, out_path: str | Pa
         "- **Primary metric**: RMSE / mean(|Adj Close|) on the test window; bootstrap 95% CIs (n=200).\n"
     )
     lines.append(
+        "- **Naive baseline**: tomorrow's close = today's close (persistence).\n"
+    )
+    lines.append(
+        "- **Deep learning**: RNN / LSTM / BiLSTM predict the next-day log return from a 7-day window of the "
+        "same 39 scaled features as Tier 3, one step ahead from observed data; early stopping on a chronological "
+        "validation set (last 15% of training) with best-weight restore.\n"
+    )
+    lines.append(
         "- **Secondary**: 5-day direction uses a 5-step chain of one-day log-return forecasts for Tier-3 models.\n"
     )
     lines.append(

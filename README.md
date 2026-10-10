@@ -35,6 +35,22 @@ The fourth command trains every model, writes `results/charts_data.json`, starts
 
 You can also set `SINGLE_TICKER=NVDA python run_experiment.py` if you prefer env vars (overridden by `--ticker`).
 
+### Deep-learning experiments
+
+`dl_experiments.py` sweeps recurrent-model variants and appends one row per run to `results/dl_experiments.csv`, with per-epoch train/validation loss curves in `results/dl_curves/`.
+
+| Command | Varies |
+| --- | --- |
+| `python dl_experiments.py --grid baseline --ticker NVDA` | The four `run_experiment.py` architectures |
+| `python dl_experiments.py --grid cells` | RNN vs. GRU vs. LSTM |
+| `python dl_experiments.py --grid size` | Layer count and width |
+| `python dl_experiments.py --grid lookback` | Window length (5, 7, 21, 63 days) |
+| `python dl_experiments.py --grid features` | Returns only vs. technical vs. all 39 features |
+| `python dl_experiments.py --grid regularization` | Dropout, weight decay, learning rate |
+| `python dl_experiments.py --grid all` | Everything above |
+
+Omit `--ticker` to run all five tickers. Add new variants by editing `GRIDS` in the script. Compare `test_ret_rmse` against `test_zero_ret_rmse` (always predicting a 0% move), and check `test_frac_pred_up` and `test_corr`: a run that predicts "up" on ~100% of days with near-zero correlation has collapsed to the average return.
+
 ---
 
 ## 3. Using the dashboard
@@ -121,7 +137,7 @@ Prices are cached for 15 minutes and macro data for 6 hours, so the first reques
 - **Baselines (Tier 0):** Naive (t-1), Buy & Hold, SMA 50/200 cross
 - **Classical (Tier 1–2):** Holt–Winters, ARIMA on log returns
 - **Multivariate ML (Tier 3):** Ridge, MARS (if `pyearth` available), RandomForest, SVR (row-capped), MLP, XGBoost-like, LightGBM
-- **Deep learning (Tier 4):** RNN, LSTM-A, LSTM-B, BiLSTM (PyTorch, MPS if available)
+- **Deep learning (Tier 4):** RNN, LSTM-A, LSTM-B, BiLSTM (PyTorch, MPS if available). Each predicts the next-day log return from a 7-day window of the same 39 scaled features as Tier 3, one step ahead from observed data. Early stopping uses the last 15% of the training period as a chronological validation set and restores the best weights.
 - **HMM:** `GaussianHMM` regime labels + regime-conditional next-day forecast
 - **Ensembles (Tier 5):** weighted voting (top-3 by OOF RMSE), stacking (Ridge meta-learner)
 

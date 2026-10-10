@@ -12,7 +12,7 @@ import json
 import threading
 import time
 import warnings
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import joblib
 import numpy as np
